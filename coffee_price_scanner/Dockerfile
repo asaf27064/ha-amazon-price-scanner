@@ -1,4 +1,4 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.22
 FROM $BUILD_FROM
 # Alpine packages - no compilation needed on the Home Assistant host
 RUN apk add --no-cache python3 py3-pip py3-requests py3-beautifulsoup4 py3-lxml tzdata \

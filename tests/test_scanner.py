@@ -89,6 +89,9 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scanner.seller_kind({"seller": "Speditore / Venditore Amazon Amazon"}), "amazon")
         self.assertEqual(scanner.seller_kind({"seller": "Sold by Amazon Export Sales LLC"}), "amazon")
         self.assertEqual(scanner.seller_kind({"seller": "Shipper / Seller Amazon.com Amazon.com"}), "amazon")
+        self.assertEqual(scanner.seller_kind({"seller": "Venduto e spedito da Negozio XYZ"}), "other")
+        self.assertEqual(scanner.seller_kind({"seller": "Vendu et expédié par Amazon"}), "amazon")
+        self.assertEqual(scanner.seller_kind({"buybox": "Ships from and sold by Amazon.com"}), "amazon")
         self.assertEqual(scanner.seller_kind({"seller": "Sold by Direct sales USA",
                                               "buybox": "Ships from: Amazon Sold by: Direct sales USA"}), "other")
         self.assertEqual(scanner.seller_kind({"seller": "Vendu par MBS Merchandise Store"}), "other")
@@ -98,7 +101,8 @@ class ScannerTest(unittest.TestCase):
         third = {"to": "Israël", "title": "x", "price": "648,70€", "seller": "Vendu par MBS Merchandise Store"}
         own = {"to": "Israël", "title": "x", "price": "651,38€", "seller": "Expéditeur / Vendeur Amazon"}
         get = Mock(return_value=dict(own))
-        raw = scanner.prefer_amazon(get, "fr", "B000000001", third)
+        raw, blocked = scanner.prefer_amazon(get, "fr", "B000000001", third)
+        self.assertFalse(blocked)
         get.assert_called_once_with("?smid=A1X6FK5RDHNB96&psc=1")
         self.assertEqual(raw["price"], "651,38€")
         self.assertEqual(raw["alt"]["price"], "648,70€")
@@ -106,11 +110,14 @@ class ScannerTest(unittest.TestCase):
 
     def test_keeps_marketplace_offer_without_amazon_offer(self):
         third = {"to": "Israël", "title": "x", "price": "648,70€", "seller": "Vendu par MBS"}
-        for other in ({"captcha": True}, {"title": "x", "seller": "Vendu par MBS", "price": "1€"}, {"status": "http 404"}):
-            self.assertIs(scanner.prefer_amazon(Mock(return_value=other), "fr", "B000000001", third), third)
+        for other, blocked in (({"captcha": True}, True), ({"title": "x", "seller": "Vendu par MBS", "price": "1€"}, False),
+                               ({"status": "http 404"}, False), ({"status": "http 503"}, True)):
+            raw, was_blocked = scanner.prefer_amazon(Mock(return_value=other), "fr", "B000000001", third)
+            self.assertIs(raw, third)
+            self.assertEqual(was_blocked, blocked)
         get = Mock()
         amazon = {"price": "1€", "seller": "Sold by Amazon"}
-        self.assertIs(scanner.prefer_amazon(get, "us", "B000000001", amazon), amazon)
+        self.assertEqual(scanner.prefer_amazon(get, "us", "B000000001", amazon), (amazon, False))
         get.assert_not_called()
 
     def test_scan_reads_amazon_offer_for_marketplace_buy_box(self):
@@ -177,6 +184,102 @@ class ScannerTest(unittest.TestCase):
                                      "stores": ["fr"], "cookies": {}})
         client.assert_not_called()
         self.assertTrue(res["stores"]["fr"]["raw"]["status"].startswith("blocked"))
+
+    # ---- 1.3.0: robustness
+    def test_one_missing_page_does_not_stop_the_store(self):
+        good = scanner.parse(GOOD)
+        with patch.object(scanner, "fetch", side_effect=[({"status": "error: product page missing"}, ""), (good, ""),
+                                                         (good, "")]) as fetch, patch.object(scanner.time, "sleep"):
+            items = scanner.scan_store(self.state, "it")["items"]
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual([i["raw"].get("status") for i in items], ["error: product page missing", None, None])
+
+    def test_two_errors_in_a_row_skip_the_rest_without_cooldown(self):
+        with patch.object(scanner, "fetch", return_value=({"status": "error: ConnectionError"}, "")) as fetch, \
+                patch.object(scanner.time, "sleep"):
+            items = scanner.scan_store(self.state, "it")["items"]
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(items[2]["raw"]["status"], "skipped (store aborted)")
+        self.assertNotIn("it", scanner.load_cooldowns())
+
+    def test_blocked_amazon_offer_page_pauses_the_store(self):
+        page = GOOD + '<div id="corePrice_feature_div"><span class="a-offscreen">10,00€</span></div>'
+        third = scanner.parse(page + '<div id="merchantInfoFeature_feature_div">Venduto da Negozio</div>')
+        with patch.object(scanner, "fetch", side_effect=[(third, ""), ({"captcha": True}, "")]) as fetch, \
+                patch.object(scanner.time, "sleep"):
+            items = scanner.scan_store(self.state, "it")["items"]
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(items[0]["raw"]["price"], "10,00€")      # the page that was read is kept
+        self.assertEqual(items[1]["raw"]["status"], "blocked (store cooldown)")
+        self.assertGreater(scanner.load_cooldowns()["it"], scanner.time.time())
+
+    def test_check_store_reports_unreadable_page_as_transient(self):
+        class Client:
+            def __init__(self, store, jar):
+                pass
+
+            def product(self, asin, query=""):
+                return {"status": "error: browser navigation timeout"}
+
+            def search(self, model):
+                return []
+
+            def close(self):
+                pass
+
+        with patch.object(scanner, "StoreClient", Client):
+            res = scanner.check_store({"asin": "B000000001", "cookies": {}}, "fr", "ECAM472.50.B")
+        self.assertEqual(res["raw"]["status"], "error: browser navigation timeout")
+
+    def test_check_store_search_captcha_pauses_store(self):
+        class Client:
+            def __init__(self, store, jar):
+                pass
+
+            def product(self, asin, query=""):
+                return {"title": "Other", "details": ["XYZ123"]}
+
+            def search(self, model):
+                raise scanner.Blocked()
+
+            def close(self):
+                pass
+
+        with patch.object(scanner, "StoreClient", Client):
+            res = scanner.check_store({"asin": "B000000001", "cookies": {}}, "de", "ECAM472.50.B")
+        self.assertTrue(res["raw"]["status"].startswith("blocked"))
+        self.assertIn("de", scanner.load_cooldowns())
+
+    def test_due_slot_uses_the_workers_mode_per_day(self):
+        state = {"settings": {"mode": "2h", "primeAuto": True}, "primeDays": [],
+                 "schedules": {"3x": [8, 14, 20], "2h": [8, 10, 12, 14, 16, 18, 20, 22], "1h": list(range(7, 24))},
+                 "modes": {"2026-09-29": "2h", "2026-09-28": "3x"}}
+        class Clock(scanner.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return scanner.datetime(2026, 9, 29, 0, 10, tzinfo=scanner.IL)
+
+        with patch.object(scanner, "datetime", Clock):
+            self.assertEqual(scanner.due_slot(state), "2026-09-28 20")   # not 22 (yesterday was 3x/day)
+
+    def test_failed_ingest_is_resent_not_rescanned(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-24 14", "scanRequest": None}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot=None, payload=None, tries=0)
+        with patch.object(scanner.requests, "get", return_value=resp), \
+                patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
+                patch.object(scanner, "scan_store", return_value={"jar": "", "items": []}) as scan, \
+                patch.object(scanner, "progress"), patch.object(scanner.time, "sleep"), \
+                patch.object(scanner, "send_ingest", side_effect=[False, False, True]) as send:
+            self.assertEqual(scanner.main(), 1)
+            self.assertEqual(scanner.main(), 1)
+            self.assertEqual(scanner.main(), 0)
+            self.assertEqual(scanner.main(), 0)          # payload delivered - nothing more to do
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(send.call_args.args[0]["version"], scanner.VERSION)
 
 
 if __name__ == "__main__":

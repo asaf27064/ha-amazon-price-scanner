@@ -34,6 +34,18 @@ If this add-on is stopped, Cloudflare automatically runs the light scan as a fal
 
 ## Adding products (precise check)
 When you paste a product link on the dashboard, the dashboard shows a quick check within seconds and queues a
-precise check. This add-on picks it up within 5 seconds, checks all stores in parallel and the dashboard updates
-the preview ("✓ verified"). `check_concurrency` (1–6, default 3) sets how many stores are checked at once –
-lower it on hosts with little memory.
+precise check. This add-on picks it up within about 5 seconds (also while a scheduled scan is running – checks
+have their own thread and their own Chromium profiles), checks the stores in parallel with the same pacing as
+scans, and the dashboard updates the preview ("✓ verified"). `check_concurrency` (1–6, default 3) sets how many
+stores are checked at once – lower it on hosts with little memory.
+
+## How a scan behaves
+- A full scan reads every tracked product page one at a time (`request_delay` seconds apart), so it takes
+  roughly 20–25 seconds per page. The add-on tells the Worker which store it is scanning, and the Worker holds
+  back its light fallback scan while the precise scan is running.
+- A CAPTCHA or rate limit pauses that store for 60 minutes. A single missing page (removed product) or a slow
+  page no longer stops the store; two errors in a row skip the rest of that store for this scan.
+- If the Worker cannot take a finished scan, the add-on re-sends the same result (up to 5 times) instead of
+  scanning Amazon again.
+- When a marketplace seller holds the buy box, the add-on also reads Amazon's own offer for that product.
+- Chromium caches are excluded from Home Assistant backups.

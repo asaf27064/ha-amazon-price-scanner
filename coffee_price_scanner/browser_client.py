@@ -103,6 +103,9 @@ class BrowserClient:
         return self.driver.page_source
 
     def close(self):
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
+        driver, self.driver = getattr(self, "driver", None), None
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass  # a crashed Chromium must not replace the scan result
