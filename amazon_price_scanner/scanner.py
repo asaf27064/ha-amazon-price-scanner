@@ -1,4 +1,4 @@
-"""Precise Amazon scanner for the coffee price tracker (runs as a Home Assistant add-on, or anywhere with Python).
+"""Precise Amazon scanner for the Amazon price tracker (runs as a Home Assistant add-on, or anywhere with Python).
 
 Reads every field from the real page structure (BeautifulSoup + lxml, CSS selectors) - no text slicing -
 and hands the raw fields to the Cloudflare Worker (/api/ingest), which computes the delivered-to-Israel
@@ -32,7 +32,7 @@ TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "10")))
 BLOCK_COOLDOWN = 3600
-VERSION = "1.3.0"
+VERSION = "2.0.0"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -638,7 +638,7 @@ def job_loop():
 
 if __name__ == "__main__":
     if "--loop" in sys.argv:
-        print(f"coffee scanner {VERSION} started (transport={TRANSPORT}; scans checked every 2 minutes, "
+        print(f"amazon price scanner {VERSION} started (transport={TRANSPORT}; scans checked every 2 minutes, "
               f"product checks every {JOB_POLL}s, {CHECK_CONCURRENCY} stores in parallel)", flush=True)
         threading.Thread(target=job_loop, name="jobs", daemon=True).start()
         while True:

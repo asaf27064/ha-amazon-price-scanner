@@ -1,4 +1,4 @@
-# Coffee Price Scanner
+# Amazon Price Scanner
 
 Runs the precise Amazon scanner from your home network and sends the results to your Cloudflare
 price tracker (dashboard + Telegram alerts). It checks every 2 minutes whether a scan is due

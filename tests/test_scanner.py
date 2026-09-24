@@ -7,11 +7,11 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("WORKER_URL", "https://example.invalid")
 os.environ.setdefault("UPLOAD_KEY", "test")
-spec = importlib.util.spec_from_file_location("scanner", Path(__file__).parents[1] / "coffee_price_scanner/scanner.py")
+spec = importlib.util.spec_from_file_location("scanner", Path(__file__).parents[1] / "amazon_price_scanner/scanner.py")
 scanner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scanner)
 
-GOOD = '<title>Product</title><span id="productTitle">Coffee machine</span><span id="glow-ingress-line2">Israele</span>'
+GOOD = '<title>Product</title><span id="productTitle">Product</span><span id="glow-ingress-line2">Israele</span>'
 
 
 class ScannerTest(unittest.TestCase):

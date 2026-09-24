@@ -19,5 +19,5 @@ export HOME=/data/scanner/home
 mkdir -p "$DATA_DIR" "$HOME"
 chown -R scanner:scanner "$DATA_DIR"
 chmod 700 "$DATA_DIR" "$HOME"
-bashio::log.info "Coffee price scanner starting"
+bashio::log.info "Amazon price scanner starting"
 exec su-exec scanner /opt/venv/bin/python -u /scanner.py --loop

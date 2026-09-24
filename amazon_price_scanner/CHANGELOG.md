@@ -1,3 +1,9 @@
+# 2.0.0
+
+- Renamed to **Amazon Price Scanner** (slug `amazon_price_scanner`, repository `ha-amazon-price-scanner`).
+  Home Assistant treats it as a new add-on: install it, set the options (worker URL
+  `https://amazon-price-tracker.asaf27064.workers.dev`, same upload key) and remove the old "Coffee Price Scanner".
+
 # 1.3.0
 
 - A single missing or slow product page no longer stops the rest of the store; two errors in a row skip the
