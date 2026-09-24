@@ -29,7 +29,7 @@ TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "10")))
 BLOCK_COOLDOWN = 3600
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 DOMAIN = {"it": "it", "fr": "fr", "es": "es", "de": "de", "uk": "co.uk", "us": "com"}
 LANG = {"it": "it-IT,it;q=0.9", "fr": "fr-FR,fr;q=0.9", "es": "es-ES,es;q=0.9", "de": "de-DE,de;q=0.9",
@@ -79,8 +79,8 @@ def jar_str(d):
 def request_cookies(jar, store):
     d = jar_dict(jar)
     d["i18n-prefs"] = CUR[store]
-    if store == "us":
-        d["lc-main"] = "en_US"
+    locale = LANG[store].split(",", 1)[0].replace("-", "_")
+    d["lc-main" if store == "us" else "lc-acb" + store] = locale
     return jar_str(d)
 
 

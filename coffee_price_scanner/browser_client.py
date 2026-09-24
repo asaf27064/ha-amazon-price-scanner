@@ -23,6 +23,10 @@ class BrowserClient:
         options.add_argument("--window-size=1365,900")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-first-run")
+        locale = {"it": "it-IT", "fr": "fr-FR", "es": "es-ES", "de": "de-DE",
+                  "uk": "en-GB", "us": "en-US"}[store]
+        options.add_argument(f"--lang={locale}")
+        options.add_experimental_option("prefs", {"intl.accept_languages": locale})
         # Chromium's namespace sandbox cannot nest inside HA's restricted container.
         # Run as the dedicated scanner user within the add-on's container isolation.
         options.add_argument("--no-sandbox")
@@ -77,6 +81,7 @@ class BrowserClient:
         if raw.get("captcha") or not raw.get("title"):
             if not raw.get("captcha"):
                 raw["status"] = "error: product page missing"
+                raw["pageMessage"] = self.driver.find_element("tag name", "body").text[:500]
             return raw, original_jar
         cookies = self.driver.get_cookies()
         jar = "; ".join(f"{c['name']}={c['value']}" for c in cookies

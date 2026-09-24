@@ -1,3 +1,8 @@
+# 1.1.1
+
+- Set each marketplace's language explicitly, replacing invalid `lc-*=-` values.
+- Include a short page message in diagnostics when no product is returned.
+
 # 1.1.0
 
 - Use Chromium with a persistent anonymous profile per Amazon store by default.

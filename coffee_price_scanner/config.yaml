@@ -1,5 +1,5 @@
 name: Coffee Price Scanner
-version: "1.1.0"
+version: "1.1.1"
 slug: coffee_price_scanner
 description: Precise Amazon (EU/UK/US → Israel) price scanner for the private coffee price tracker
 url: https://github.com/asaf27064/ha-coffee-price-scanner

@@ -31,6 +31,12 @@ class ScannerTest(unittest.TestCase):
         self.assertTrue(scanner.parse('<input id="captchacharacters">')["captcha"])
         self.assertFalse(scanner.parse(GOOD)["captcha"])
 
+    def test_replaces_invalid_locale_cookies(self):
+        jar = scanner.jar_dict(scanner.request_cookies("session-id=original; lc-acbes=-", "es"))
+        self.assertEqual(jar["lc-acbes"], "es_ES")
+        self.assertEqual(jar["session-id"], "original")
+        self.assertEqual(jar["i18n-prefs"], "EUR")
+
     def test_challenge_cannot_replace_delivery_cookies(self):
         response = Mock(status_code=503, text='<form action="/errors/validateCaptcha"></form>')
         response.cookies = [Mock(name="session-id", value="bad")]
