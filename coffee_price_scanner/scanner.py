@@ -13,6 +13,7 @@ import os
 import random
 import re
 import sys
+from pathlib import Path
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -24,6 +25,11 @@ WORKER = os.environ["WORKER_URL"].rstrip("/")
 AUTH = {"Authorization": "Bearer " + os.environ["UPLOAD_KEY"]}
 FORCE = "--force" in sys.argv or os.environ.get("FORCE", "").lower() == "true"
 DRY = "--dry" in sys.argv
+TRANSPORT = os.environ.get("TRANSPORT", "requests")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "10")))
+BLOCK_COOLDOWN = 3600
+VERSION = "1.1.0"
 
 DOMAIN = {"it": "it", "fr": "fr", "es": "es", "de": "de", "uk": "co.uk", "us": "com"}
 LANG = {"it": "it-IT,it;q=0.9", "fr": "fr-FR,fr;q=0.9", "es": "es-ES,es;q=0.9", "de": "de-DE,de;q=0.9",
@@ -81,8 +87,9 @@ def request_cookies(jar, store):
 # ------------------------------------------------------------------ precise parser
 def parse(html):
     soup = BeautifulSoup(html, "lxml")
-    captcha = soup.select_one('form[action*="validateCaptcha"]') is not None
     page_title = clean(soup.title.get_text()) if soup.title else ""
+    captcha = (soup.select_one('form[action*="validateCaptcha"], #captchacharacters') is not None
+               or bool(re.search(r"robot check|captcha", page_title, re.I)))
     img = soup.select_one("#landingImage")
     image = (img.get("data-old-hires") or img.get("src") or "") if img else ""
     # item-details model numbers (tables and bullet lists)
@@ -130,14 +137,98 @@ def fetch(session, store, asin, jar):
     url = f"https://www.amazon.{DOMAIN[store]}/dp/{asin}"
     r = session.get(url, headers={"User-Agent": UA, "Accept-Language": LANG[store], "Accept": "text/html",
                                   "Cookie": request_cookies(jar, store)}, timeout=40)
-    d = jar_dict(jar)
-    for c in r.cookies:
-        if KEEP_COOKIES.match(c.name):
-            d[c.name] = c.value
-    jar = jar_str(d)
+    raw = parse(r.text)
+    if raw.get("captcha"):
+        return raw, jar  # A challenge must never replace the known delivery session.
     if r.status_code != 200:
         return {"status": f"http {r.status_code}"}, jar
-    return parse(r.text), jar
+    d = jar_dict(jar)
+    for c in r.cookies:
+        if KEEP_COOKIES.fullmatch(c.name):
+            d[c.name] = c.value
+    return raw, jar_str(d)
+
+
+def is_blocked(raw):
+    return bool(raw.get("captcha")) or raw.get("status") in ("http 403", "http 429", "http 503")
+
+
+def load_cooldowns():
+    try:
+        return json.loads((DATA_DIR / "cooldowns.json").read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_cooldowns(cooldowns):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temp = DATA_DIR / "cooldowns.tmp"
+    temp.write_text(json.dumps(cooldowns))
+    temp.replace(DATA_DIR / "cooldowns.json")
+
+
+def scan_store(state, store, diagnostic=False):
+    jar = state["cookies"].get(store, "")
+    items = []
+    blocked = False
+    cooldowns = load_cooldowns()
+    cooling = cooldowns.get(store, 0) > time.time()
+    browser = None
+    session = requests.Session()
+    fetched = False
+    try:
+        for p in state["products"]:
+            if store in p.get("skip", []):
+                continue
+            asins = p["asinsByStore"].get(store)
+            if not asins:
+                if not diagnostic:
+                    items.append({"product": p["key"], "asin": "", "raw": {
+                        "status": "not matched" if asins is None else "not listed"}})
+                continue
+            for asin in asins:
+                if blocked or cooling:
+                    raw = {"status": "blocked (store cooldown)"}
+                else:
+                    if fetched:
+                        time.sleep(REQUEST_DELAY + random.uniform(0, 3))
+                    fetched = True
+                    try:
+                        if TRANSPORT == "browser":
+                            if browser is None:
+                                from browser_client import BrowserClient
+                                browser = BrowserClient(store, DOMAIN[store], request_cookies(jar, store),
+                                                        KEEP_COOKIES, DATA_DIR)
+                            raw, candidate_jar = browser.fetch(asin, parse, jar)
+                        elif TRANSPORT == "requests":
+                            raw, candidate_jar = fetch(session, store, asin, jar)
+                        else:
+                            raise ValueError("unknown transport")
+                        # Accept updated delivery sessions only on real Israel product pages.
+                        if (not is_blocked(raw) and raw.get("title")
+                                and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
+                            jar = candidate_jar
+                    except Exception as e:
+                        # Do not log exception text: drivers may include HTML or sensitive URLs.
+                        raw = {"status": "error: " + type(e).__name__}
+                    if is_blocked(raw):
+                        blocked = True
+                        cooldowns[store] = time.time() + BLOCK_COOLDOWN
+                        save_cooldowns(cooldowns)
+                        print(store, "blocked; pausing this store for 60 minutes", flush=True)
+                    elif raw.get("status", "").startswith("error:"):
+                        # A broken driver/network should not be restarted once per product.
+                        blocked = True
+                items.append({"product": p["key"], "asin": asin, "raw": raw})
+                print(store, asin, {k: raw.get(k) for k in
+                      ("captcha", "to", "price", "price2", "delivery", "status")}, flush=True)
+                if diagnostic:
+                    return {"jar": jar, "items": items}
+    finally:
+        session.close()
+        if browser is not None:
+            browser.close()
+    return {"jar": jar, "items": items}
 
 
 # ------------------------------------------------------------------ schedule
@@ -155,49 +246,29 @@ def due_slot(state):
 
 
 def run_debug(state):
-    """Diagnostics: what does Amazon return to THIS machine? Sent to the Worker without touching any data."""
-    info = {"ipv4_only_setting": IPV4_ONLY}
-    for name, url in [("ipinfo", "https://ipinfo.io/json"), ("ipv6", "https://api6.ipify.org?format=json"),
-                      ("ipv4", "https://api4.ipify.org?format=json")]:
-        try:
-            info[name] = requests.get(url, timeout=12).json()
-        except Exception as e:
-            info[name] = "error: " + str(e)[:80]
-    try:
-        info["amazon_it_resolves_to"] = sorted({a[4][0] for a in socket.getaddrinfo("www.amazon.it", 443)})[:6]
-    except Exception as e:
-        info["amazon_it_resolves_to"] = str(e)[:80]
-    session = requests.Session()
-    out = {}
-    tests = []
+    """One product per store, using the configured scanner (no duplicate retry pass)."""
+    import platform
+    info = {"version": VERSION, "transport": TRANSPORT, "platform": platform.platform(),
+            "python": platform.python_version(), "ipv4_only_setting": IPV4_ONLY,
+            "request_delay": REQUEST_DELAY}
+    results = {}
     for store in state["stores"]:
-        for p in state["products"][:2]:
-            lst = p["asinsByStore"].get(store) or []
-            if store not in p.get("skip", []) and lst:
-                tests.append((store, lst[0]))
-    for mode in (["default", "ipv4"] if not IPV4_ONLY else ["ipv4"]):
-        set_ipv4_only(mode == "ipv4")
-        rows = []
-        for store, asin in (tests if mode == "ipv4" or IPV4_ONLY else tests[:4]):
-            url = f"https://www.amazon.{DOMAIN[store]}/dp/{asin}"
-            try:
-                r = session.get(url, headers={"User-Agent": UA, "Accept-Language": LANG[store], "Accept": "text/html",
-                                              "Cookie": request_cookies(state["cookies"].get(store, ""), store)}, timeout=40)
-                raw = parse(r.text) if r.status_code == 200 else {}
-                rows.append({"store": store, "asin": asin, "http": r.status_code, "final_url": r.url[:120], "bytes": len(r.content),
-                             **{k: (raw.get(k) or "")[:160] if isinstance(raw.get(k), str) else raw.get(k)
-                                for k in ("captcha", "to", "price", "delivery", "delivery2", "avail", "global", "pageTitle")}})
-            except Exception as e:
-                rows.append({"store": store, "asin": asin, "error": str(e)[:120]})
-            time.sleep(random.uniform(1.5, 2.5))
-        out[mode] = rows
-    set_ipv4_only(IPV4_ONLY)
-    r = requests.post(WORKER + "/api/ingest", headers=AUTH, json={"debug": True, "info": info, "results": out}, timeout=60)
+        data = scan_store(state, store, diagnostic=True)
+        results[store] = [{"asin": i["asin"], **i["raw"]} for i in data["items"]]
+        time.sleep(REQUEST_DELAY)
+    if DRY:
+        print(json.dumps({"info": info, "results": results}, ensure_ascii=True))
+        return
+    r = requests.post(WORKER + "/api/ingest", headers=AUTH,
+                      json={"debug": True, "info": info, "results": results}, timeout=60)
+    r.raise_for_status()
     print("debug report sent:", r.status_code, flush=True)
 
 
 def main():
-    state = requests.get(WORKER + "/api/state", headers=AUTH, timeout=60).json()
+    response = requests.get(WORKER + "/api/state", headers=AUTH, timeout=60)
+    response.raise_for_status()
+    state = response.json()
     if str(state.get("scanRequest") or "").startswith("debug"):
         run_debug(state)
         return 0
@@ -210,32 +281,11 @@ def main():
     if not force and slot == state.get("lastScanSlot"):
         return 0                                        # this slot was already scanned
     print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
-    session = requests.Session()
-    payload = {"slot": slot if not requested or slot != state.get("lastScanSlot") else slot, "engine": "home", "stores": {}}
+    payload = {"slot": slot, "engine": "home", "stores": {}}
     for store in state["stores"]:
-        jar = state["cookies"].get(store, "")
-        items = []
-        for p in state["products"]:
-            if store in p.get("skip", []):
-                continue
-            lst = p["asinsByStore"].get(store)
-            if lst is None or not lst:
-                items.append({"product": p["key"], "asin": "", "raw": {"status": "not matched" if lst is None else "not listed"}})
-                continue
-            for asin in lst:
-                try:
-                    raw, jar = fetch(session, store, asin, jar)
-                    if raw.get("captcha"):  # one polite retry
-                        time.sleep(8)
-                        raw, jar = fetch(session, store, asin, jar)
-                except Exception as e:  # network hiccup
-                    raw = {"status": "error: " + str(e)[:60]}
-                items.append({"product": p["key"], "asin": asin, "raw": raw})
-                if DRY:
-                    print(store, asin, {k: raw.get(k) for k in ("to", "price", "price2", "delivery", "avail", "status")})
-                time.sleep(random.uniform(1.2, 2.5))
-        payload["stores"][store] = {"jar": jar, "items": items}
-        print(store, "done:", len(items), "items")
+        payload["stores"][store] = scan_store(state, store)
+        print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
+        time.sleep(REQUEST_DELAY)
     if DRY:
         print("dry run - not sending")
         return 0
@@ -249,11 +299,11 @@ def main():
 
 if __name__ == "__main__":
     if "--loop" in sys.argv:
-        print("coffee scanner started (checks every 2 minutes)", flush=True)
+        print(f"coffee scanner {VERSION} started (transport={TRANSPORT}; checks every 2 minutes)", flush=True)
         while True:
             try:
                 main()
             except Exception as e:  # keep the add-on alive on network errors
-                print("error:", e, flush=True)
+                print("error:", type(e).__name__, flush=True)
             time.sleep(120)
     sys.exit(main())

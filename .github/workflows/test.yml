@@ -1,0 +1,26 @@
+name: Scanner checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the HA amd64 image
+        run: docker build --build-arg BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.22 -t coffee-scanner:test coffee_price_scanner
+      - name: Scanner regression tests
+        run: docker run --rm --entrypoint /opt/venv/bin/python -v "$PWD/tests:/tests:ro" -v "$PWD/coffee_price_scanner:/coffee_price_scanner:ro" coffee-scanner:test -m unittest discover -s /tests -v
+      - name: Chromium smoke test as scanner user
+        run: |
+          docker run --rm --entrypoint su-exec -e HOME=/tmp coffee-scanner:test scanner /opt/venv/bin/python -c '
+          import re
+          from browser_client import BrowserClient
+          client = BrowserClient("it", "it", "session-id=test", re.compile("session-id"), "/tmp/scanner")
+          try:
+              client.driver.get("data:text/html,<title>scanner smoke test</title><h1>ready</h1>")
+              assert client.driver.title == "scanner smoke test"
+              print("Chromium", client.driver.capabilities["browserVersion"], "OK")
+          finally:
+              client.close()
+          '
