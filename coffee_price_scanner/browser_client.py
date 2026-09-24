@@ -37,7 +37,9 @@ class BrowserClient:
             seed = self.profile / "delivery-seed.json"
             fingerprint = hashlib.sha256(jar.encode()).hexdigest()
             previous = json.loads(seed.read_text()) if seed.exists() else {}
-            if previous.get("fingerprint") != fingerprint:
+            existing = self.driver.execute_cdp_cmd("Network.getCookies", {"urls": [self.origin]})
+            has_session = any(c["name"] == "session-id" for c in existing.get("cookies", []))
+            if previous.get("fingerprint") != fingerprint or not has_session:
                 for part in jar.split(";"):
                     if "=" not in part:
                         continue
@@ -62,6 +64,12 @@ class BrowserClient:
         try:
             WebDriverWait(self.driver, 15).until(lambda d: d.find_elements(
                 "css selector", '#productTitle, form[action*="validateCaptcha"], #captchacharacters'))
+        except TimeoutException:
+            pass
+        # Delivery fragments can arrive after the product title at DOMContentLoaded.
+        try:
+            WebDriverWait(self.driver, 15).until(
+                lambda d: d.execute_script("return document.readyState") == "complete")
         except TimeoutException:
             pass
         raw = parse(self.driver.page_source)
