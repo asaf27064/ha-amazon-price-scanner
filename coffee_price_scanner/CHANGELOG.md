@@ -1,3 +1,7 @@
+# 1.2.1
+
+- Recognise the new "Shipper / Seller Amazon" wording on amazon.com / amazon.co.uk as sold by Amazon.
+
 # 1.2.0
 
 - Precise "add product" checks: the dashboard queues a check and the add-on polls for it every 5 seconds.

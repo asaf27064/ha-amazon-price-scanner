@@ -32,7 +32,7 @@ TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "10")))
 BLOCK_COOLDOWN = 3600
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 
@@ -236,7 +236,7 @@ ALT_KEYS = ("to", "title", "price", "price2", "delivery", "delivery2", "avail", 
 def seller_kind(raw):
     """"amazon" (sold by Amazon), "other" (a marketplace seller) or "" (unknown)."""
     text = re.sub(r"\s+", " ", f'{raw.get("seller", "")} | {raw.get("buybox", "")}')
-    if re.search(rf"(?:{SHIP_L})\s*/\s*(?:{SOLD_L})\s*:?\s*Amazon", text, re.I):
+    if re.search(rf"(?:{SHIP_L}|Shipper|Dispatcher)\s*/\s*(?:{SOLD_L}|Seller)\s*:?\s*Amazon", text, re.I):
         return "amazon"
     m = re.search(rf"(?:{SOLD_L})\s*:?\s*(\S+)", text, re.I)
     if m:

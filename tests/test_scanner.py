@@ -88,6 +88,7 @@ class ScannerTest(unittest.TestCase):
     def test_seller_kind(self):
         self.assertEqual(scanner.seller_kind({"seller": "Speditore / Venditore Amazon Amazon"}), "amazon")
         self.assertEqual(scanner.seller_kind({"seller": "Sold by Amazon Export Sales LLC"}), "amazon")
+        self.assertEqual(scanner.seller_kind({"seller": "Shipper / Seller Amazon.com Amazon.com"}), "amazon")
         self.assertEqual(scanner.seller_kind({"seller": "Sold by Direct sales USA",
                                               "buybox": "Ships from: Amazon Sold by: Direct sales USA"}), "other")
         self.assertEqual(scanner.seller_kind({"seller": "Vendu par MBS Merchandise Store"}), "other")
