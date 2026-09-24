@@ -37,6 +37,19 @@ DETAIL_LABELS = ["Numéro du modèle", "Référence de pièce", "Numero modello"
                  "Model Number", "Model number", "Part Number", "Part number"]
 IL = ZoneInfo("Asia/Jerusalem")
 
+import socket
+import urllib3.util.connection as _uc
+_DEFAULT_FAMILY = _uc.allowed_gai_family
+
+
+def set_ipv4_only(on):
+    """Force IPv4 for all requests (some home networks' IPv6 is geolocated/treated differently by Amazon)."""
+    _uc.allowed_gai_family = (lambda: socket.AF_INET) if on else _DEFAULT_FAMILY
+
+
+IPV4_ONLY = os.environ.get("IPV4_ONLY", "false").lower() == "true"
+set_ipv4_only(IPV4_ONLY)
+
 
 def clean(s):
     return re.sub(r"\s+", " ", (s or "").replace(" ", " ").replace("‎", "").replace("‏", "")).strip()
@@ -141,8 +154,53 @@ def due_slot(state):
     return None
 
 
+def run_debug(state):
+    """Diagnostics: what does Amazon return to THIS machine? Sent to the Worker without touching any data."""
+    info = {"ipv4_only_setting": IPV4_ONLY}
+    for name, url in [("ipinfo", "https://ipinfo.io/json"), ("ipv6", "https://api6.ipify.org?format=json"),
+                      ("ipv4", "https://api4.ipify.org?format=json")]:
+        try:
+            info[name] = requests.get(url, timeout=12).json()
+        except Exception as e:
+            info[name] = "error: " + str(e)[:80]
+    try:
+        info["amazon_it_resolves_to"] = sorted({a[4][0] for a in socket.getaddrinfo("www.amazon.it", 443)})[:6]
+    except Exception as e:
+        info["amazon_it_resolves_to"] = str(e)[:80]
+    session = requests.Session()
+    out = {}
+    tests = []
+    for store in state["stores"]:
+        for p in state["products"][:2]:
+            lst = p["asinsByStore"].get(store) or []
+            if store not in p.get("skip", []) and lst:
+                tests.append((store, lst[0]))
+    for mode in (["default", "ipv4"] if not IPV4_ONLY else ["ipv4"]):
+        set_ipv4_only(mode == "ipv4")
+        rows = []
+        for store, asin in (tests if mode == "ipv4" or IPV4_ONLY else tests[:4]):
+            url = f"https://www.amazon.{DOMAIN[store]}/dp/{asin}"
+            try:
+                r = session.get(url, headers={"User-Agent": UA, "Accept-Language": LANG[store], "Accept": "text/html",
+                                              "Cookie": request_cookies(state["cookies"].get(store, ""), store)}, timeout=40)
+                raw = parse(r.text) if r.status_code == 200 else {}
+                rows.append({"store": store, "asin": asin, "http": r.status_code, "final_url": r.url[:120], "bytes": len(r.content),
+                             **{k: (raw.get(k) or "")[:160] if isinstance(raw.get(k), str) else raw.get(k)
+                                for k in ("captcha", "to", "price", "delivery", "delivery2", "avail", "global", "pageTitle")}})
+            except Exception as e:
+                rows.append({"store": store, "asin": asin, "error": str(e)[:120]})
+            time.sleep(random.uniform(1.5, 2.5))
+        out[mode] = rows
+    set_ipv4_only(IPV4_ONLY)
+    r = requests.post(WORKER + "/api/ingest", headers=AUTH, json={"debug": True, "info": info, "results": out}, timeout=60)
+    print("debug report sent:", r.status_code, flush=True)
+
+
 def main():
     state = requests.get(WORKER + "/api/state", headers=AUTH, timeout=60).json()
+    if str(state.get("scanRequest") or "").startswith("debug"):
+        run_debug(state)
+        return 0
     engine = state["settings"].get("engine", "cloudflare")
     requested = bool(state.get("scanRequest"))          # "scan now" pressed on the dashboard
     force = FORCE or requested
