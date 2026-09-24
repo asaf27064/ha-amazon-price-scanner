@@ -7,6 +7,10 @@ export REQUEST_DELAY=10
 if bashio::config.has_value 'transport'; then
     export TRANSPORT="$(bashio::config 'transport')"
 fi
+export CHECK_CONCURRENCY=3
+if bashio::config.has_value 'check_concurrency'; then
+    export CHECK_CONCURRENCY="$(bashio::config 'check_concurrency')"
+fi
 if bashio::config.has_value 'request_delay'; then
     export REQUEST_DELAY="$(bashio::config 'request_delay')"
 fi

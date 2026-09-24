@@ -84,6 +84,99 @@ class ScannerTest(unittest.TestCase):
             scanner.scan_store(self.state, "it", diagnostic=True)
         self.assertEqual(fetch.call_count, 1)
 
+    # ---- seller: prefer Amazon's own offer
+    def test_seller_kind(self):
+        self.assertEqual(scanner.seller_kind({"seller": "Speditore / Venditore Amazon Amazon"}), "amazon")
+        self.assertEqual(scanner.seller_kind({"seller": "Sold by Amazon Export Sales LLC"}), "amazon")
+        self.assertEqual(scanner.seller_kind({"seller": "Sold by Direct sales USA",
+                                              "buybox": "Ships from: Amazon Sold by: Direct sales USA"}), "other")
+        self.assertEqual(scanner.seller_kind({"seller": "Vendu par MBS Merchandise Store"}), "other")
+        self.assertEqual(scanner.seller_kind({"seller": ""}), "")
+
+    def test_prefers_amazon_offer_and_keeps_marketplace_offer(self):
+        third = {"to": "Israël", "title": "x", "price": "648,70€", "seller": "Vendu par MBS Merchandise Store"}
+        own = {"to": "Israël", "title": "x", "price": "651,38€", "seller": "Expéditeur / Vendeur Amazon"}
+        get = Mock(return_value=dict(own))
+        raw = scanner.prefer_amazon(get, "fr", "B000000001", third)
+        get.assert_called_once_with("?smid=A1X6FK5RDHNB96&psc=1")
+        self.assertEqual(raw["price"], "651,38€")
+        self.assertEqual(raw["alt"]["price"], "648,70€")
+        self.assertIn("smid=A1X6FK5RDHNB96", raw["url"])
+
+    def test_keeps_marketplace_offer_without_amazon_offer(self):
+        third = {"to": "Israël", "title": "x", "price": "648,70€", "seller": "Vendu par MBS"}
+        for other in ({"captcha": True}, {"title": "x", "seller": "Vendu par MBS", "price": "1€"}, {"status": "http 404"}):
+            self.assertIs(scanner.prefer_amazon(Mock(return_value=other), "fr", "B000000001", third), third)
+        get = Mock()
+        amazon = {"price": "1€", "seller": "Sold by Amazon"}
+        self.assertIs(scanner.prefer_amazon(get, "us", "B000000001", amazon), amazon)
+        get.assert_not_called()
+
+    def test_scan_reads_amazon_offer_for_marketplace_buy_box(self):
+        page = GOOD + '<div id="corePrice_feature_div"><span class="a-offscreen">10,00€</span></div>'
+        third = scanner.parse(page + '<div id="merchantInfoFeature_feature_div">Venduto da Negozio</div>')
+        own = scanner.parse(page + '<div id="merchantInfoFeature_feature_div">Speditore / Venditore Amazon</div>')
+        state = {"cookies": {"it": ""}, "products": [{"key": "one", "asinsByStore": {"it": ["B000000001"]}}]}
+        with patch.object(scanner, "fetch", side_effect=[(third, ""), (own, "")]) as fetch, \
+                patch.object(scanner.time, "sleep"):
+            item = scanner.scan_store(state, "it")["items"][0]
+        self.assertEqual(fetch.call_args_list[1].args[4], "?smid=A11IL2PNWYJU7H&psc=1")
+        self.assertEqual(scanner.seller_kind(item["raw"]), "amazon")
+        self.assertIn("alt", item["raw"])
+
+    # ---- precise "add product" check
+    def test_model_matching(self):
+        self.assertEqual(scanner.model_core("ECAM472.50.B"), "ECAM47250")
+        self.assertTrue(scanner.page_matches({"title": "x", "details": ["ECAM 472.50.B"]}, "ECAM472.50.B"))
+        self.assertFalse(scanner.page_matches({"title": "Eletta Ultra ECAM472.50.B", "details": ["ECAM450.65.G"]},
+                                              "ECAM472.50.B"))
+        self.assertTrue(scanner.page_matches({"title": "Eletta Explore", "pageTitle": "ECAM472.50.B - Amazon"},
+                                             "ECAM472.50.B"))
+        self.assertFalse(scanner.page_matches({"captcha": True, "title": "x"}, "ECAM472.50.B"))
+
+    def test_search_results_skip_accessories(self):
+        html = ('<div data-component-type="s-search-result" data-asin="B000000001"><h2>De\'Longhi ECAM472.50.B</h2></div>'
+                '<div data-component-type="s-search-result" data-asin="B000000002"><h2>Caraffa compatibile ECAM472</h2></div>'
+                '<div data-component-type="s-search-result" data-asin=""><h2>Ad</h2></div>')
+        self.assertEqual([h["asin"] for h in scanner.parse_search(html)], ["B000000001"])
+
+    def test_variations(self):
+        html = '"dimensionValuesDisplayData" : {"B000000001":["Nero"],"B000000002":["Titanio"]}'
+        self.assertEqual(scanner.variations_from(html), [{"asin": "B000000001", "label": "Nero"},
+                                                         {"asin": "B000000002", "label": "Titanio"}])
+
+    def test_check_job_searches_when_asin_is_other_product(self):
+        wrong = {"title": "Eletta Explore", "details": ["ECAM450.65.G"], "seller": "Sold by Amazon"}
+        right = {"title": "Eletta Ultra", "details": ["ECAM472.50.B"], "seller": "Sold by Amazon", "price": "1€"}
+
+        class Client:
+            def __init__(self, store, jar):
+                self.store = store
+
+            def product(self, asin, query=""):
+                return right if (asin == "B000000009" or self.store == "it") else wrong
+
+            def search(self, model):
+                return [{"asin": "B000000009", "title": "De'Longhi Eletta Ultra ECAM472.50.B"}]
+
+            def close(self):
+                pass
+
+        job = {"id": "j", "asin": "B000000001", "linkStore": "it", "model": "ECAM472.50.B",
+               "stores": ["it", "fr"], "cookies": {}}
+        with patch.object(scanner, "StoreClient", Client):
+            res = scanner.check_job(job)
+        self.assertEqual(res["stores"]["it"]["via"], "same")
+        self.assertEqual(res["stores"]["fr"], {"asin": "B000000009", "via": "search", "raw": right})
+
+    def test_check_job_respects_cooldown(self):
+        scanner.save_cooldowns({"fr": scanner.time.time() + 100})
+        with patch.object(scanner, "StoreClient") as client:
+            res = scanner.check_job({"id": "j", "asin": "B000000001", "linkStore": "fr", "model": "X1",
+                                     "stores": ["fr"], "cookies": {}})
+        client.assert_not_called()
+        self.assertTrue(res["stores"]["fr"]["raw"]["status"].startswith("blocked"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -57,8 +57,8 @@ class BrowserClient:
             self.close()
             raise
 
-    def fetch(self, asin, parse, original_jar):
-        url = f"{self.origin}/dp/{asin}"
+    def fetch(self, asin, parse, original_jar, query=""):
+        url = f"{self.origin}/dp/{asin}{query}"
         try:
             self.driver.get(url)
         except TimeoutException:
@@ -87,6 +87,20 @@ class BrowserClient:
         jar = "; ".join(f"{c['name']}={c['value']}" for c in cookies
                         if self.cookie_filter.fullmatch(c["name"]))
         return raw, jar
+
+    def get_html(self, url):
+        """Any Amazon page (e.g. search results) after it finished loading."""
+        try:
+            self.driver.get(url)
+        except TimeoutException:
+            self.driver.execute_script("window.stop()")
+            return ""
+        try:
+            WebDriverWait(self.driver, 15).until(
+                lambda d: d.execute_script("return document.readyState") == "complete")
+        except TimeoutException:
+            pass
+        return self.driver.page_source
 
     def close(self):
         if self.driver:

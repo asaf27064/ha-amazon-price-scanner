@@ -31,3 +31,9 @@ regular scan logs destination, price, delivery and status, without cookie values
 
 On the dashboard choose **Engine → Home Assistant – precise**.
 If this add-on is stopped, Cloudflare automatically runs the light scan as a fallback.
+
+## Adding products (precise check)
+When you paste a product link on the dashboard, the dashboard shows a quick check within seconds and queues a
+precise check. This add-on picks it up within 5 seconds, checks all stores in parallel and the dashboard updates
+the preview ("✓ verified"). `check_concurrency` (1–6, default 3) sets how many stores are checked at once –
+lower it on hosts with little memory.

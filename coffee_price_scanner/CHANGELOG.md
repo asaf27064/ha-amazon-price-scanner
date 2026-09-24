@@ -1,3 +1,13 @@
+# 1.2.0
+
+- Precise "add product" checks: the dashboard queues a check and the add-on polls for it every 5 seconds.
+- Checks all stores in parallel (`check_concurrency`, default 3), one page per store, verifies the match by the
+  item-details model number and searches the store by model when the same ASIN is a different product.
+- Reports page variations (colours/styles) and never logs page contents.
+- Prefers Amazon's own offer: when a marketplace seller has the buy box, also reads the page with Amazon's
+  merchant id (`?smid=`) and sends both, so the dashboard can prefer "sold by Amazon" and still show the cheaper
+  marketplace offer.
+
 # 1.1.1
 
 - Set each marketplace's language explicitly, replacing invalid `lc-*=-` values.
