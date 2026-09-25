@@ -32,8 +32,13 @@ DRY = "--dry" in sys.argv
 TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "30")))
+# Adaptive pace: after CLEAN_SCANS_TO_SPEED_UP full scans without any challenge the gap between pages shrinks by
+# PACE_STEP seconds, down to MIN_REQUEST_DELAY; the first challenge puts it straight back to REQUEST_DELAY.
+MIN_REQUEST_DELAY = min(REQUEST_DELAY, max(5, float(os.environ.get("MIN_REQUEST_DELAY", "20"))))
+CLEAN_SCANS_TO_SPEED_UP = 3
+PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.3"
+VERSION = "2.0.4"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -293,6 +298,8 @@ _STORE_LOCKS = {store: threading.RLock() for store in DOMAIN}
 _PAGE_LOCK = threading.Lock()
 _NEXT_PAGE_AT = 0.0
 _PAGE_COUNTS = {store: 0 for store in DOMAIN}
+_LOAD_SECONDS = {store: 0.0 for store in DOMAIN}
+_WAIT_SECONDS = {store: 0.0 for store in DOMAIN}
 _CHALLENGE_COUNTS = {store: 0 for store in DOMAIN}
 
 
@@ -323,6 +330,40 @@ def save_cooldowns(cooldowns):
         temp.replace(DATA_DIR / "cooldowns.json")
 
 
+def load_pace():
+    try:
+        pace = json.loads((DATA_DIR / "pace.json").read_text())
+    except (FileNotFoundError, ValueError):
+        pace = {}
+    delay = float(pace.get("delay", REQUEST_DELAY))
+    return {"delay": min(REQUEST_DELAY, max(MIN_REQUEST_DELAY, delay)), "clean": int(pace.get("clean", 0))}
+
+
+def save_pace(pace):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temp = DATA_DIR / "pace.tmp"
+    temp.write_text(json.dumps(pace))
+    temp.replace(DATA_DIR / "pace.json")
+
+
+def current_delay():
+    return load_pace()["delay"]
+
+
+def update_pace(challenges):
+    """After a full scan: slow straight down to the configured delay on any challenge, speed up gently after
+    several clean scans (never below MIN_REQUEST_DELAY)."""
+    pace = load_pace()
+    if challenges:
+        pace = {"delay": REQUEST_DELAY, "clean": 0}
+    else:
+        pace["clean"] += 1
+        if pace["clean"] >= CLEAN_SCANS_TO_SPEED_UP and pace["delay"] > MIN_REQUEST_DELAY:
+            pace = {"delay": max(MIN_REQUEST_DELAY, pace["delay"] - PACE_STEP), "clean": 0}
+    save_pace(pace)
+    return pace
+
+
 def serialized_store(fn):
     @wraps(fn)
     def run(state_or_job, store, *args, **kwargs):
@@ -345,8 +386,10 @@ def amazon_page(store, get):
         wait = _NEXT_PAGE_AT - time.monotonic()
         if wait > 0:
             time.sleep(wait)
+            _WAIT_SECONDS[store] += wait
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
+        started = time.monotonic()
         try:
             _PAGE_COUNTS[store] += 1
             value = get()
@@ -361,7 +404,8 @@ def amazon_page(store, get):
             set_cooldown(store)
             raise
         finally:
-            _NEXT_PAGE_AT = time.monotonic() + REQUEST_DELAY + random.uniform(0, 3)
+            _LOAD_SECONDS[store] += time.monotonic() - started
+            _NEXT_PAGE_AT = time.monotonic() + current_delay() + random.uniform(0, 3)
 
 
 def read_product(session, browser, store, asin, jar, query=""):
@@ -389,12 +433,17 @@ def scan_store(state, store, diagnostic=False):
     browser = None
     session = requests.Session()
     initial_pages, initial_challenges = _PAGE_COUNTS[store], _CHALLENGE_COUNTS[store]
+    initial_load, initial_wait = _LOAD_SECONDS[store], _WAIT_SECONDS[store]
 
     def result():
-        stats = {"requested_pages": _PAGE_COUNTS[store] - initial_pages,
+        pages = _PAGE_COUNTS[store] - initial_pages
+        stats = {"requested_pages": pages,
                  "challenges": _CHALLENGE_COUNTS[store] - initial_challenges,
                  "skipped_cooldown": sum(i["raw"].get("status") == "blocked (store cooldown)" for i in items),
-                 "cooldown_until": load_cooldowns().get(store, 0)}
+                 "cooldown_until": load_cooldowns().get(store, 0),
+                 "load_seconds": round(_LOAD_SECONDS[store] - initial_load, 1),
+                 "wait_seconds": round(_WAIT_SECONDS[store] - initial_wait, 1),
+                 "delay": current_delay()}
         print(store, "summary:", stats, flush=True)
         return {"jar": jar, "items": items, "stats": stats}
 
@@ -628,14 +677,13 @@ def run_debug(state):
     import platform
     info = {"version": VERSION, "transport": TRANSPORT, "platform": platform.platform(),
             "python": platform.python_version(), "ipv4_only_setting": IPV4_ONLY,
-            "request_delay": REQUEST_DELAY}
+            "request_delay": REQUEST_DELAY, "min_request_delay": MIN_REQUEST_DELAY, "current_delay": current_delay()}
     info["store_stats"] = {}
     results = {}
     for store in state["stores"]:
         data = scan_store(state, store, diagnostic=True)
         info["store_stats"][store] = data["stats"]
         results[store] = [{"asin": i["asin"], **i["raw"]} for i in data["items"]]
-        time.sleep(REQUEST_DELAY)
     if DRY:
         print(json.dumps({"info": info, "results": results}, ensure_ascii=True))
         return
@@ -652,6 +700,16 @@ def progress(slot, store):
     """Tell the Worker a precise scan is running (it then holds back its light fallback scan)."""
     try:
         requests.post(WORKER + "/api/progress", headers=AUTH, json={"slot": slot, "store": store}, timeout=15)
+    except Exception:
+        pass
+
+
+def send_partial(slot, store, data):
+    """One store's results right away, so the dashboard shows them during a long scan (display only - the full
+    result at the end still does history and alerts). Failures don't matter."""
+    try:
+        requests.post(WORKER + "/api/ingest-partial", headers=AUTH,
+                      json={"slot": slot, "store": store, "items": data["items"]}, timeout=30)
     except Exception:
         pass
 
@@ -703,7 +761,10 @@ def main():
         progress(slot, store)
         payload["stores"][store] = scan_store(state, store)
         print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
-        time.sleep(REQUEST_DELAY)
+        if not DRY:
+            send_partial(slot, store, payload["stores"][store])
+    pace = update_pace(sum(d.get("stats", {}).get("challenges", 0) for d in payload["stores"].values()))
+    print("pace: next gap between pages", pace["delay"], "s", flush=True)
     if DRY:
         print("dry run - not sending")
         return 0

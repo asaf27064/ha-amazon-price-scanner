@@ -11,6 +11,10 @@ export CHECK_CONCURRENCY=3
 if bashio::config.has_value 'check_concurrency'; then
     export CHECK_CONCURRENCY="$(bashio::config 'check_concurrency')"
 fi
+export MIN_REQUEST_DELAY=20
+if bashio::config.has_value 'min_request_delay'; then
+    export MIN_REQUEST_DELAY="$(bashio::config 'min_request_delay')"
+fi
 if bashio::config.has_value 'request_delay'; then
     export REQUEST_DELAY="$(bashio::config 'request_delay')"
 fi

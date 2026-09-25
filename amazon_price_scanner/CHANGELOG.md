@@ -1,3 +1,13 @@
+# 2.0.4
+
+- Faster scans without a faster request rate: no extra wait between stores (the shared page queue already paces
+  every request), and the Worker leaves out pages known to be unavailable except on one scan a day.
+- Adaptive pace: after 3 full scans without any challenge the gap between pages shrinks by 2.5 s, down to
+  `min_request_delay` (default 20 s); the first challenge puts it straight back to `request_delay`.
+  Set `min_request_delay` equal to `request_delay` to keep a fixed pace.
+- Each store's results are sent as soon as the store is done, so the dashboard updates during a scan.
+- Scan statistics include page-load and waiting time per store and the current gap between pages.
+
 # 2.0.3
 
 - A dashboard scan request is served once: if its result can't be delivered it is re-sent (up to 5 times) and then

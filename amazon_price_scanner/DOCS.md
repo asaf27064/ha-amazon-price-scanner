@@ -67,3 +67,9 @@ An existing CAPTCHA is not solved by these changes. Leave its cooldown intact. I
 still required after waiting, it needs human interaction in that same HA browser session, or a data
 source that supplies the required prices without scraping. Clearing profiles, repeatedly scanning,
 or changing the IP is not part of this recovery procedure.
+
+## Pace (request_delay / min_request_delay)
+`request_delay` is the safe gap between Amazon pages (default 30 s). After 3 full scans without any CAPTCHA the
+add-on shortens the gap by 2.5 s, down to `min_request_delay` (default 20 s). The first CAPTCHA puts it straight
+back to `request_delay`. To keep a fixed pace, set both to the same value. The current gap and per-store timings
+are shown on the dashboard (Settings → scanner status).
