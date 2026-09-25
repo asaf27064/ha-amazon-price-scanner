@@ -3,7 +3,7 @@ export WORKER_URL="$(bashio::config 'worker_url')"
 export UPLOAD_KEY="$(bashio::config 'upload_key')"
 export IPV4_ONLY="$(bashio::config 'ipv4_only')"
 export TRANSPORT=browser
-export REQUEST_DELAY=10
+export REQUEST_DELAY=30
 if bashio::config.has_value 'transport'; then
     export TRANSPORT="$(bashio::config 'transport')"
 fi

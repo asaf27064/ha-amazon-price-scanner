@@ -16,6 +16,7 @@ import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from functools import wraps
 from pathlib import Path
 import time
 from datetime import datetime, timedelta
@@ -30,9 +31,9 @@ FORCE = "--force" in sys.argv or os.environ.get("FORCE", "").lower() == "true"
 DRY = "--dry" in sys.argv
 TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "10")))
+REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "30")))
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -256,6 +257,8 @@ def prefer_amazon(get, store, asin, raw):
     query = f"?smid={AMAZON_SMID[store]}&psc=1"
     try:
         own = get(query)
+    except Blocked:
+        return raw, True
     except Exception:
         return raw, False
     if is_blocked(own):
@@ -274,14 +277,24 @@ def is_blocked(raw):
     return bool(raw.get("captcha")) or raw.get("status") in ("http 403", "http 429", "http 503")
 
 
+_COOLDOWN_LOCK = threading.RLock()
+_STORE_LOCKS = {store: threading.RLock() for store in DOMAIN}
+_PAGE_LOCK = threading.Lock()
+_NEXT_PAGE_AT = 0.0
+_PAGE_COUNTS = {store: 0 for store in DOMAIN}
+_CHALLENGE_COUNTS = {store: 0 for store in DOMAIN}
+
+
+class Blocked(Exception):
+    """This store is cooling down. Do not make a request."""
+
+
 def load_cooldowns():
-    try:
-        return json.loads((DATA_DIR / "cooldowns.json").read_text())
-    except (FileNotFoundError, ValueError):
-        return {}
-
-
-_COOLDOWN_LOCK = threading.Lock()
+    with _COOLDOWN_LOCK:
+        try:
+            return json.loads((DATA_DIR / "cooldowns.json").read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
 
 
 def set_cooldown(store):
@@ -292,10 +305,57 @@ def set_cooldown(store):
 
 
 def save_cooldowns(cooldowns):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    temp = DATA_DIR / "cooldowns.tmp"
-    temp.write_text(json.dumps(cooldowns))
-    temp.replace(DATA_DIR / "cooldowns.json")
+    with _COOLDOWN_LOCK:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        temp = DATA_DIR / "cooldowns.tmp"
+        temp.write_text(json.dumps(cooldowns))
+        temp.replace(DATA_DIR / "cooldowns.json")
+
+
+def serialized_store(fn):
+    @wraps(fn)
+    def run(state_or_job, store, *args, **kwargs):
+        # Checks and scans share a single profile. Never open it twice simultaneously.
+        with _STORE_LOCKS[store]:
+            return fn(state_or_job, store, *args, **kwargs)
+    return run
+
+
+def amazon_page(store, get):
+    """One shared queue for ALL product, seller and search page requests.
+
+    Re-check cooldown after waiting: another thread may have just seen a challenge.
+    Record a challenge before releasing the queue, so waiting requests see it.
+    """
+    global _NEXT_PAGE_AT
+    with _PAGE_LOCK:
+        if load_cooldowns().get(store, 0) > time.time():
+            raise Blocked()
+        wait = _NEXT_PAGE_AT - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        if load_cooldowns().get(store, 0) > time.time():
+            raise Blocked()
+        try:
+            _PAGE_COUNTS[store] += 1
+            value = get()
+            raw = value[0] if isinstance(value, tuple) else value
+            if isinstance(raw, str):
+                raw = parse(raw)
+            if isinstance(raw, dict) and is_blocked(raw):
+                _CHALLENGE_COUNTS[store] += 1
+                set_cooldown(store)
+            return value
+        except Blocked:
+            set_cooldown(store)
+            raise
+        finally:
+            _NEXT_PAGE_AT = time.monotonic() + REQUEST_DELAY + random.uniform(0, 3)
+
+
+def read_product(session, browser, store, asin, jar, query=""):
+    return amazon_page(store, lambda: browser.fetch(asin, parse, jar, query) if browser is not None
+                       else fetch(session, store, asin, jar, query))
 
 
 def close_quietly(*things):
@@ -307,17 +367,26 @@ def close_quietly(*things):
             pass
 
 
+@serialized_store
 def scan_store(state, store, diagnostic=False):
     jar = state["cookies"].get(store, "")
     items = []
     blocked = False
     aborted = False
     errors_in_row = 0
-    cooldowns = load_cooldowns()
-    cooling = cooldowns.get(store, 0) > time.time()
+    cooling = load_cooldowns().get(store, 0) > time.time()
     browser = None
     session = requests.Session()
-    fetched = False
+    initial_pages, initial_challenges = _PAGE_COUNTS[store], _CHALLENGE_COUNTS[store]
+
+    def result():
+        stats = {"requested_pages": _PAGE_COUNTS[store] - initial_pages,
+                 "challenges": _CHALLENGE_COUNTS[store] - initial_challenges,
+                 "skipped_cooldown": sum(i["raw"].get("status") == "blocked (store cooldown)" for i in items),
+                 "cooldown_until": load_cooldowns().get(store, 0)}
+        print(store, "summary:", stats, flush=True)
+        return {"jar": jar, "items": items, "stats": stats}
+
     try:
         for p in state["products"]:
             if store in p.get("skip", []):
@@ -329,50 +398,44 @@ def scan_store(state, store, diagnostic=False):
                         "status": "not matched" if asins is None else "not listed"}})
                 continue
             for asin in asins:
-                if blocked or cooling:
+                if blocked or cooling or load_cooldowns().get(store, 0) > time.time():
                     raw = {"status": "blocked (store cooldown)"}
                 elif aborted:
                     raw = {"status": "skipped (store aborted)"}
                 else:
-                    if fetched:
-                        time.sleep(REQUEST_DELAY + random.uniform(0, 3))
-                    fetched = True
                     try:
                         if TRANSPORT == "browser":
                             if browser is None:
                                 from browser_client import BrowserClient
                                 browser = BrowserClient(store, DOMAIN[store], request_cookies(jar, store),
                                                         KEEP_COOKIES, DATA_DIR)
-                            raw, candidate_jar = browser.fetch(asin, parse, jar)
+                            raw, candidate_jar = read_product(session, browser, store, asin, jar)
                         elif TRANSPORT == "requests":
-                            raw, candidate_jar = fetch(session, store, asin, jar)
+                            raw, candidate_jar = read_product(session, None, store, asin, jar)
                         else:
                             raise ValueError("unknown transport")
                         # Accept updated delivery sessions only on real Israel product pages.
                         if (not is_blocked(raw) and raw.get("title")
                                 and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
                             jar = candidate_jar
-                            if seller_kind(raw) == "other":
-                                time.sleep(REQUEST_DELAY / 2 + random.uniform(0, 2))
-
+                            if not diagnostic and seller_kind(raw) == "other":
                                 def get(query, asin=asin):
-                                    if browser is not None:
-                                        return browser.fetch(asin, parse, jar, query)[0]
-                                    return fetch(session, store, asin, jar, query)[0]
+                                    return read_product(session, browser, store, asin, jar, query)[0]
                                 raw, smid_blocked = prefer_amazon(get, store, asin, raw)
                                 if smid_blocked:
                                     blocked = True
-                                    cooldowns[store] = time.time() + BLOCK_COOLDOWN
-                                    save_cooldowns(cooldowns)
+                                    set_cooldown(store)
                                     print(store, "blocked on the Amazon-offer page; pausing this store for 60 minutes",
                                           flush=True)
+                    except Blocked:
+                        blocked = True
+                        raw = {"status": "blocked (store cooldown)"}
                     except Exception as e:
                         # Do not log exception text: drivers may include HTML or sensitive URLs.
                         raw = {"status": "error: " + type(e).__name__}
                     if is_blocked(raw):
                         blocked = True
-                        cooldowns[store] = time.time() + BLOCK_COOLDOWN
-                        save_cooldowns(cooldowns)
+                        set_cooldown(store)
                         print(store, "blocked; pausing this store for 60 minutes", flush=True)
                     elif raw.get("status", "").startswith("error:"):
                         # One missing page (removed ASIN) or one slow page is a per-product result; only a
@@ -387,59 +450,49 @@ def scan_store(state, store, diagnostic=False):
                 print(store, asin, {k: raw.get(k) for k in
                       ("captcha", "to", "price", "price2", "delivery", "status")}, flush=True)
                 if diagnostic:
-                    return {"jar": jar, "items": items}
+                    return result()
     finally:
         close_quietly(session, browser)
-    return {"jar": jar, "items": items}
+    return result()
 
 
 # ------------------------------------------------------------------ "add product" check (fast, parallel)
-class Blocked(Exception):
-    """Amazon answered with a challenge / rate limit: pause this store."""
-
-
 class StoreClient:
-    """One marketplace session for a product check, using the configured transport. Checks may run while a
-    scheduled scan is using the store's normal Chromium profile, so they use their own profiles (DATA_DIR/check)
-    and keep the same pacing between pages as the scan (half the request delay)."""
+    """A product check uses the same store profile and page queue as scheduled scans."""
 
     def __init__(self, store, jar):
         self.store, self.jar = store, jar
         self.session = requests.Session()
         self.browser = None
-        self.pages = 0
-
-    def _pace(self):
-        if self.pages:
-            time.sleep(REQUEST_DELAY / 2 + random.uniform(0, 1.5))
-        self.pages += 1
 
     def _browser(self):
         if self.browser is None:
             from browser_client import BrowserClient
             self.browser = BrowserClient(self.store, DOMAIN[self.store], request_cookies(self.jar, self.store),
-                                         KEEP_COOKIES, DATA_DIR / "check")
+                                         KEEP_COOKIES, DATA_DIR)
         return self.browser
 
     def product(self, asin, query=""):
-        self._pace()
-        if TRANSPORT == "browser":
-            raw, _ = self._browser().fetch(asin, parse, self.jar, query)
-        else:
-            raw, _ = fetch(self.session, self.store, asin, self.jar, query)
+        browser = self._browser() if TRANSPORT == "browser" else None
+        raw, candidate = read_product(self.session, browser, self.store, asin, self.jar, query)
+        if (not is_blocked(raw) and raw.get("title")
+                and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
+            self.jar = candidate
         return raw
 
     def search(self, model):
-        self._pace()
         url = f"https://www.amazon.{DOMAIN[self.store]}/s?k={requests.utils.quote(model)}"
-        if TRANSPORT == "browser":
-            html = self._browser().get_html(url)
-        else:
-            r = self.session.get(url, headers={"User-Agent": UA, "Accept-Language": LANG[self.store], "Accept": "text/html",
-                                               "Cookie": request_cookies(self.jar, self.store)}, timeout=40)
+
+        def get():
+            if TRANSPORT == "browser":
+                return self._browser().get_html(url)
+            r = self.session.get(url, headers={"User-Agent": UA, "Accept-Language": LANG[self.store],
+                                 "Accept": "text/html", "Cookie": request_cookies(self.jar, self.store)}, timeout=40)
             if r.status_code in (403, 429, 503):
                 raise Blocked()
-            html = r.text if r.status_code == 200 else ""
+            return r.text if r.status_code == 200 else ""
+
+        html = amazon_page(self.store, get)
         if html and parse(html).get("captcha"):
             raise Blocked()
         return parse_search(html) if html else []
@@ -448,6 +501,7 @@ class StoreClient:
         close_quietly(self.session, self.browser)
 
 
+@serialized_store
 def check_store(job, store, model):
     """Find and read the product in one store: same ASIN if its page shows the model, else search by model."""
     if load_cooldowns().get(store, 0) > time.time():
@@ -550,9 +604,11 @@ def run_debug(state):
     info = {"version": VERSION, "transport": TRANSPORT, "platform": platform.platform(),
             "python": platform.python_version(), "ipv4_only_setting": IPV4_ONLY,
             "request_delay": REQUEST_DELAY}
+    info["store_stats"] = {}
     results = {}
     for store in state["stores"]:
         data = scan_store(state, store, diagnostic=True)
+        info["store_stats"][store] = data["stats"]
         results[store] = [{"asin": i["asin"], **i["raw"]} for i in data["items"]]
         time.sleep(REQUEST_DELAY)
     if DRY:

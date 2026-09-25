@@ -18,10 +18,13 @@ class ScannerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        for target, value in [("DATA_DIR", Path(self.tmp.name)), ("TRANSPORT", "requests")]:
+        for target, value in [("DATA_DIR", Path(self.tmp.name)), ("TRANSPORT", "requests"), ("_NEXT_PAGE_AT", 0.0)]:
             p = patch.object(scanner, target, value)
             p.start()
             self.addCleanup(p.stop)
+        sleeper = patch.object(scanner.time, "sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         self.state = {"cookies": {"it": "session-id=original"}, "products": [
             {"key": "one", "asinsByStore": {"it": ["B000000001", "B000000002"]}},
             {"key": "two", "asinsByStore": {"it": ["B000000003"]}}]}
@@ -83,6 +86,66 @@ class ScannerTest(unittest.TestCase):
         with patch.object(scanner, "fetch", return_value=(scanner.parse(GOOD), "")) as fetch:
             scanner.scan_store(self.state, "it", diagnostic=True)
         self.assertEqual(fetch.call_count, 1)
+
+    def test_cooldown_created_during_scan_stops_next_request(self):
+        def get(*args):
+            scanner.set_cooldown("it")
+            return scanner.parse(GOOD), ""
+        with patch.object(scanner, "fetch", side_effect=get) as fetch:
+            result = scanner.scan_store(self.state, "it")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(result["items"][1]["raw"]["status"], "blocked (store cooldown)")
+
+    def test_scan_cooldown_preserves_other_threads_cooldown(self):
+        def get(*args):
+            scanner.set_cooldown("fr")
+            return {"captcha": True}, ""
+        with patch.object(scanner, "fetch", side_effect=get):
+            scanner.scan_store(self.state, "it")
+        self.assertEqual(set(scanner.load_cooldowns()), {"it", "fr"})
+
+    def test_page_queue_is_shared_across_stores(self):
+        with patch.object(scanner.time, "monotonic", return_value=100), \
+                patch.object(scanner.random, "uniform", return_value=0), \
+                patch.object(scanner.time, "sleep") as sleep:
+            scanner.amazon_page("it", lambda: {})
+            scanner.amazon_page("fr", lambda: {})
+        sleep.assert_called_once_with(scanner.REQUEST_DELAY)
+
+    def test_page_queue_rechecks_cooldown_after_wait(self):
+        scanner._NEXT_PAGE_AT = 200
+        get = Mock(return_value={})
+        with patch.object(scanner.time, "monotonic", return_value=100), \
+                patch.object(scanner.time, "sleep", side_effect=lambda _: scanner.set_cooldown("it")):
+            with self.assertRaises(scanner.Blocked):
+                scanner.amazon_page("it", get)
+        get.assert_not_called()
+
+    def test_seller_page_uses_full_delay(self):
+        with patch.object(scanner, "fetch", return_value=({}, "")), \
+                patch.object(scanner.time, "monotonic", return_value=100), \
+                patch.object(scanner.random, "uniform", return_value=0), \
+                patch.object(scanner.time, "sleep") as sleep:
+            scanner.read_product(None, None, "it", "B000000001", "")
+            scanner.read_product(None, None, "it", "B000000001", "", "?smid=test")
+        sleep.assert_called_once_with(scanner.REQUEST_DELAY)
+
+    def test_store_operations_cannot_open_same_profile_together(self):
+        import threading
+        started, entered = threading.Event(), threading.Event()
+        @scanner.serialized_store
+        def operation(job, store):
+            entered.set()
+        def task():
+            started.set()
+            operation({}, "it")
+        with scanner._STORE_LOCKS["it"]:
+            thread = threading.Thread(target=task)
+            thread.start()
+            self.assertTrue(started.wait(1))
+            self.assertFalse(entered.wait(0.05))
+        thread.join(2)
+        self.assertTrue(entered.is_set())
 
     # ---- seller: prefer Amazon's own offer
     def test_seller_kind(self):

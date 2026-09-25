@@ -1,5 +1,5 @@
 name: Amazon Price Scanner
-version: "2.0.0"
+version: "2.0.1"
 slug: amazon_price_scanner
 description: Precise Amazon (EU/UK/US → Israel) price scanner for the private Amazon price tracker
 url: https://github.com/asaf27064/ha-amazon-price-scanner
@@ -15,7 +15,7 @@ options:
   upload_key: ""
   ipv4_only: false
   transport: browser
-  request_delay: 10
+  request_delay: 30
   check_concurrency: 3
 schema:
   worker_url: url

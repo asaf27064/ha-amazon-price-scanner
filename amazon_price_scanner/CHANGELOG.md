@@ -1,3 +1,12 @@
+# 2.0.1
+
+- Share one paced request queue across scheduled scans, product checks, searches and seller-offer pages.
+- Use the full configured delay for every request; new installations default to 30 seconds.
+- Serialize scans and checks for the same store and reuse the same browser profile.
+- Re-check cooldown before every request and after waiting; preserve cooldowns written by other threads.
+- Seed Worker cookies only when no local browser session exists, and preserve session cookies on restart.
+- These changes reduce unnecessary traffic and session resets; they do not solve an existing CAPTCHA.
+
 # 2.0.0
 
 - Renamed to **Amazon Price Scanner** (slug `amazon_price_scanner`, repository `ha-amazon-price-scanner`).

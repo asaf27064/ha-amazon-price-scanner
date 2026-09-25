@@ -1,5 +1,4 @@
 """A persistent, anonymous Chromium session per Amazon marketplace."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,14 +35,12 @@ class BrowserClient:
             service=Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver")), options=options)
         self.driver.set_page_load_timeout(45)
         try:
-            # Import only the anonymous delivery cookies, never account credentials.
-            # A marker avoids replacing newer browser cookies on every process start.
-            seed = self.profile / "delivery-seed.json"
-            fingerprint = hashlib.sha256(jar.encode()).hexdigest()
-            previous = json.loads(seed.read_text()) if seed.exists() else {}
+            self._restore_session_cookies()
             existing = self.driver.execute_cdp_cmd("Network.getCookies", {"urls": [self.origin]})
             has_session = any(c["name"] == "session-id" for c in existing.get("cookies", []))
-            if previous.get("fingerprint") != fingerprint or not has_session:
+            # Worker cookies seed a NEW profile only. Its light fallback can change
+            # the shared jar; that must not overwrite this browser's live session.
+            if not has_session:
                 for part in jar.split(";"):
                     if "=" not in part:
                         continue
@@ -52,10 +49,29 @@ class BrowserClient:
                         self.driver.execute_cdp_cmd("Network.setCookie", {
                             "name": name, "value": value, "domain": f".amazon.{domain}",
                             "path": "/", "secure": True})
-                seed.write_text(json.dumps({"fingerprint": fingerprint}))
         except Exception:
             self.close()
             raise
+
+    def _restore_session_cookies(self):
+        """Chromium saves persistent cookies itself; retain session cookies on restart too."""
+        try:
+            saved = json.loads((self.profile / "session-cookies.json").read_text())
+        except (FileNotFoundError, ValueError):
+            return
+        current = self.driver.execute_cdp_cmd("Network.getCookies", {"urls": [self.origin]})["cookies"]
+        keys = {(c["name"], c["domain"], c["path"]) for c in current}
+        for cookie in saved:
+            if (cookie["name"], cookie["domain"], cookie["path"]) not in keys:
+                self.driver.execute_cdp_cmd("Network.setCookie", cookie)
+
+    def _save_session_cookies(self):
+        cookies = self.driver.execute_cdp_cmd("Network.getCookies", {"urls": [self.origin]})["cookies"]
+        fields = ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite")
+        session = [{k: c[k] for k in fields if k in c} for c in cookies if c.get("session")]
+        temp = self.profile / "session-cookies.tmp"
+        temp.write_text(json.dumps(session))
+        temp.replace(self.profile / "session-cookies.json")
 
     def fetch(self, asin, parse, original_jar, query=""):
         url = f"{self.origin}/dp/{asin}{query}"
@@ -103,8 +119,13 @@ class BrowserClient:
         return self.driver.page_source
 
     def close(self):
-        driver, self.driver = getattr(self, "driver", None), None
+        driver = getattr(self, "driver", None)
         if driver:
+            try:
+                self._save_session_cookies()
+            except Exception:
+                pass  # preserve the previous snapshot if the driver has already crashed
+            self.driver = None
             try:
                 driver.quit()
             except Exception:
