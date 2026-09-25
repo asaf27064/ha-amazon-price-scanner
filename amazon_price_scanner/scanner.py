@@ -38,7 +38,7 @@ MIN_REQUEST_DELAY = min(REQUEST_DELAY, max(5, float(os.environ.get("MIN_REQUEST_
 CLEAN_SCANS_TO_SPEED_UP = 3
 PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.5"
+VERSION = "2.0.6"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -301,6 +301,7 @@ _PAGE_COUNTS = {store: 0 for store in DOMAIN}
 _LOAD_SECONDS = {store: 0.0 for store in DOMAIN}
 _WAIT_SECONDS = {store: 0.0 for store in DOMAIN}
 _CHALLENGE_COUNTS = {store: 0 for store in DOMAIN}
+_CHALLENGE_DELAYS = {store: [] for store in DOMAIN}  # the pace in effect when each challenge came
 
 
 class Blocked(Exception):
@@ -405,6 +406,7 @@ def amazon_page(store, get):
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
         started = time.monotonic()
+        pace_now = current_delay()  # the gap this page followed (only a challenge changes it within a scan)
         try:
             _PAGE_COUNTS[store] += 1
             value = get()
@@ -413,6 +415,7 @@ def amazon_page(store, get):
                 raw = parse(raw)
             if isinstance(raw, dict) and is_blocked(raw):
                 _CHALLENGE_COUNTS[store] += 1
+                _CHALLENGE_DELAYS[store].append(pace_now)
                 set_cooldown(store)
                 slow_down_now()
             return value
@@ -451,6 +454,7 @@ def scan_store(state, store, diagnostic=False):
     session = requests.Session()
     initial_pages, initial_challenges = _PAGE_COUNTS[store], _CHALLENGE_COUNTS[store]
     initial_load, initial_wait = _LOAD_SECONDS[store], _WAIT_SECONDS[store]
+    initial_challenge_delays, delay_start = len(_CHALLENGE_DELAYS[store]), current_delay()
 
     def result():
         pages = _PAGE_COUNTS[store] - initial_pages
@@ -460,6 +464,8 @@ def scan_store(state, store, diagnostic=False):
                  "cooldown_until": load_cooldowns().get(store, 0),
                  "load_seconds": round(_LOAD_SECONDS[store] - initial_load, 1),
                  "wait_seconds": round(_WAIT_SECONDS[store] - initial_wait, 1),
+                 "delay_start": delay_start,
+                 "challenge_delays": _CHALLENGE_DELAYS[store][initial_challenge_delays:],
                  "delay": current_delay()}
         print(store, "summary:", stats, flush=True)
         return {"jar": jar, "items": items, "stats": stats}

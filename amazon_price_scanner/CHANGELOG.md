@@ -1,3 +1,8 @@
+# 2.0.6
+
+- The scan report now includes the pace each store started at and the pace each challenge came at (not only the pace
+  at the end, which a challenge has already reset to the slow one) - for the scan log on the dashboard.
+
 # 2.0.5
 
 - A challenge slows the pace down immediately - for the rest of the scan, every store and product checks too -

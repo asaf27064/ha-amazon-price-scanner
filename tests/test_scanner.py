@@ -488,6 +488,15 @@ class ScannerTest(unittest.TestCase):
                 scanner.update_pace(*scanner.scan_was_clean(failed))
             self.assertEqual(scanner.current_delay(), 30.0)
 
+    # ---- 2.0.6
+    def test_challenge_records_the_pace_it_came_at(self):
+        with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
+            scanner.save_pace({"delay": 22.5, "clean": 0})
+            before = len(scanner._CHALLENGE_DELAYS["uk"])
+            scanner.amazon_page("uk", lambda: ({"captcha": True}, ""))
+            self.assertEqual(scanner._CHALLENGE_DELAYS["uk"][before:], [22.5])   # not the 30 it was reset to
+            self.assertEqual(scanner.current_delay(), 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()
