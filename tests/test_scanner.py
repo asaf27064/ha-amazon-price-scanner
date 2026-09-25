@@ -389,6 +389,51 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
 
+    # ---- 2.0.3
+    def test_same_request_never_scans_twice_even_after_giving_up(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-24 14", "scanRequest": "2026-09-24 20:10"}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot=None, payload=None, tries=0, request=None)
+        with patch.object(scanner.requests, "get", return_value=resp), \
+                patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
+                patch.object(scanner, "scan_store", return_value={"jar": "", "items": []}) as scan, \
+                patch.object(scanner, "progress"), patch.object(scanner.time, "sleep"), \
+                patch.object(scanner, "send_ingest", return_value=False) as send:
+            for _ in range(8):                        # the Worker keeps failing, the old request stays open
+                scanner.main()
+            self.assertEqual(scan.call_count, 1)
+            self.assertEqual(send.call_count, scanner.MAX_INGEST_RETRIES)
+            state["scanRequest"] = "2026-09-24 20:40"  # a NEW request from the dashboard scans again
+            scanner.main()
+            self.assertEqual(scan.call_count, 2)
+
+    def test_search_hit_that_did_not_load_is_temporary(self):
+        class Client:
+            def __init__(self, store, jar):
+                pass
+
+            def product(self, asin, query=""):
+                if asin == "B000000009":
+                    return {"status": "error: browser navigation timeout"}
+                return {"title": "Other", "details": ["XYZ123"]}
+
+            def search(self, model):
+                return [{"asin": "B000000009", "title": "De'Longhi ECAM472.50.B"}]
+
+            def close(self):
+                pass
+
+        with patch.object(scanner, "StoreClient", Client):
+            res = scanner.check_store({"asin": "B000000001", "cookies": {}}, "fr", "ECAM472.50.B", "ref")
+        self.assertEqual(res["raw"]["status"], "error: browser navigation timeout")
+
+    def test_same_asin_with_wrong_title_is_kept(self):
+        # amazon.fr showed an "Explore" title on the Eletta Ultra's ASIN (Amazon's own mistake): same ASIN, same product
+        ref = "De'Longhi Eletta Ultra ECAM472.50.B"
+        self.assertTrue(scanner.page_matches({"title": "De'Longhi Eletta Explore Machine à café"}, "ECAM472.50", ref))
+
 
 if __name__ == "__main__":
     unittest.main()

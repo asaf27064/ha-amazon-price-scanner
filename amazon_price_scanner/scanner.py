@@ -33,7 +33,7 @@ TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "30")))
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -549,6 +549,9 @@ def check_store(job, store, model, ref_title=None):
                 if is_blocked(raw2):
                     set_cooldown(store)
                     return {"asin": job["asin"], "via": None, "raw": raw2}
+                if raw2.get("status", "").startswith(("error:", "http")):
+                    transient, raw = True, raw2       # couldn't read a candidate: the store stays "not checked yet"
+                    continue
                 if page_matches(raw2, model, ref_title or ""):
                     raw2, smid_blocked = prefer_amazon(lambda q: client.product(hit["asin"], q), store, hit["asin"], raw2)
                     if smid_blocked:
@@ -642,7 +645,7 @@ def run_debug(state):
     print("debug report sent:", r.status_code, flush=True)
 
 
-PENDING = {"slot": None, "payload": None, "tries": 0}   # last scanned slot and its unsent payload
+PENDING = {"slot": None, "payload": None, "tries": 0, "request": None}   # last scan, its unsent payload, the request it served
 
 
 def progress(slot, store):
@@ -670,7 +673,9 @@ def main():
         run_debug(state)
         return 0
     engine = state["settings"].get("engine", "cloudflare")
-    requested = bool(state.get("scanRequest"))          # "scan now" pressed on the dashboard
+    request = state.get("scanRequest") or None           # "scan now" pressed on the dashboard (its timestamp)
+    # a request is served once: if its scan couldn't be delivered, it is re-sent, never scanned again
+    requested = bool(request) and request != PENDING["request"]
     force = FORCE or requested
     if engine == "cloudflare" and not force:
         return 0                                        # light engine selected - nothing to do
@@ -702,7 +707,7 @@ def main():
     if DRY:
         print("dry run - not sending")
         return 0
-    PENDING.update(slot=slot, payload=payload, tries=1)
+    PENDING.update(slot=slot, payload=payload, tries=1, request=request)
     ok = send_ingest(payload)
     if ok:
         PENDING["payload"] = None

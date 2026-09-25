@@ -1,3 +1,10 @@
+# 2.0.3
+
+- A dashboard scan request is served once: if its result can't be delivered it is re-sent (up to 5 times) and then
+  dropped - the same request never triggers another Amazon scan; only a new request does.
+- Product checks: a search result whose page didn't load is a temporary failure (the store is retried later),
+  never "not sold in this store".
+
 # 2.0.2
 
 - A finished scan the Worker didn't accept is re-sent (never rescanned) also when the scan was requested from
