@@ -33,7 +33,7 @@ TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "30")))
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -185,8 +185,15 @@ def model_core(model):
     return core
 
 
-def page_matches(raw, model):
-    """Is this product page the product we are looking for? Item-details model numbers first, title second."""
+def title_words(text):
+    """Distinctive words of a title (brand, series), for comparing listings across languages."""
+    return {w for w in re.findall(r"[a-z0-9]{4,}", clean(text).lower().replace("'", "")) if not w.isdigit()}
+
+
+def page_matches(raw, model, ref_title=""):
+    """Is this product page the product we are looking for? Item-details model numbers first, then the title.
+    A page that shows no model number at all only matches when it clearly is the same product as the user's
+    link (ref_title): at least two shared distinctive words (e.g. brand + series)."""
     if not raw or raw.get("status") or raw.get("captcha") or not raw.get("title"):
         return False
     if not model:
@@ -195,7 +202,11 @@ def page_matches(raw, model):
     if raw.get("details"):
         return any(core in norm(d) for d in raw["details"])
     title = f'{raw.get("title", "")} {raw.get("pageTitle", "")}'
-    return core in norm(title) or not MODEL_TOKEN.search(title.upper())
+    if core in norm(title):
+        return True
+    if MODEL_TOKEN.search(title.upper()):
+        return False                                    # shows a different model number
+    return len(title_words(title) & title_words(ref_title)) >= 2
 
 
 def parse_search(html):
@@ -457,6 +468,10 @@ def scan_store(state, store, diagnostic=False):
 
 
 # ------------------------------------------------------------------ "add product" check (fast, parallel)
+class SearchFailed(Exception):
+    """A search page could not be read - says nothing about whether the store sells the product."""
+
+
 class StoreClient:
     """A product check uses the same store profile and page queue as scheduled scans."""
 
@@ -490,20 +505,25 @@ class StoreClient:
                                  "Accept": "text/html", "Cookie": request_cookies(self.jar, self.store)}, timeout=40)
             if r.status_code in (403, 429, 503):
                 raise Blocked()
-            return r.text if r.status_code == 200 else ""
+            if r.status_code != 200:
+                raise SearchFailed()
+            return r.text
 
         html = amazon_page(self.store, get)
-        if html and parse(html).get("captcha"):
+        if not html:
+            raise SearchFailed()                        # page didn't load: temporary, not "no results"
+        if parse(html).get("captcha"):
             raise Blocked()
-        return parse_search(html) if html else []
+        return parse_search(html)
 
     def close(self):
         close_quietly(self.session, self.browser)
 
 
 @serialized_store
-def check_store(job, store, model):
-    """Find and read the product in one store: same ASIN if its page shows the model, else search by model."""
+def check_store(job, store, model, ref_title=None):
+    """Find and read the product in one store: same ASIN if its page shows the model, else search by model.
+    ref_title=None means this is the store of the user's own link (the page there IS the product)."""
     if load_cooldowns().get(store, 0) > time.time():
         return {"asin": job["asin"], "via": None, "raw": {"status": "blocked (store cooldown)"}}
     client = StoreClient(store, job["cookies"].get(store, ""))
@@ -513,7 +533,7 @@ def check_store(job, store, model):
         if is_blocked(raw):
             set_cooldown(store)
             return {"asin": job["asin"], "via": None, "raw": raw}
-        if page_matches(raw, model):
+        if page_matches(raw, model if ref_title is not None else "", ref_title or ""):
             raw, smid_blocked = prefer_amazon(lambda q: client.product(job["asin"], q), store, job["asin"], raw)
             if smid_blocked:
                 set_cooldown(store)
@@ -529,7 +549,7 @@ def check_store(job, store, model):
                 if is_blocked(raw2):
                     set_cooldown(store)
                     return {"asin": job["asin"], "via": None, "raw": raw2}
-                if page_matches(raw2, model):
+                if page_matches(raw2, model, ref_title or ""):
                     raw2, smid_blocked = prefer_amazon(lambda q: client.product(hit["asin"], q), store, hit["asin"], raw2)
                     if smid_blocked:
                         set_cooldown(store)
@@ -553,15 +573,17 @@ def check_job(job):
     link = job.get("linkStore") or "it"
     model = job.get("model") or ""
     results = {}
-    if not model:  # need the model first to verify the other stores
-        results[link] = check_store(job, link, "")
-        raw = results[link]["raw"]
+    # the link's own store first: it is the reference (model number and title) for the other stores
+    results[link] = check_store(job, link, model)
+    raw = results[link]["raw"]
+    ref_title = f'{raw.get("title", "")} {raw.get("pageTitle", "")}'
+    if not model:
         details = raw.get("details") or []
-        token = MODEL_TOKEN.search(f'{raw.get("title", "")} {raw.get("pageTitle", "")}'.upper())
+        token = MODEL_TOKEN.search(ref_title.upper())
         model = details[0] if details else token.group(0) if token else ""
     todo = [st for st in stores if st not in results]
     with ThreadPoolExecutor(max_workers=CHECK_CONCURRENCY) as pool:
-        for st, res in zip(todo, pool.map(lambda st: check_store(job, st, model), todo)):
+        for st, res in zip(todo, pool.map(lambda st: check_store(job, st, model, ref_title), todo)):
             results[st] = res
     variations = (results.get(link, {}).get("raw") or {}).get("variations") or []
     for res in results.values():  # variations are only needed once
@@ -655,16 +677,21 @@ def main():
     slot = due_slot(state)
     if not force and slot == state.get("lastScanSlot"):
         return 0                                        # this slot was already scanned
-    if not force and slot == PENDING["slot"]:
-        # Scanned already but the Worker didn't take it: re-send the same payload, never rescan the slot
-        # (a rescan every 2 minutes would hammer Amazon from the home IP).
-        if PENDING["payload"] is None or PENDING["tries"] >= MAX_INGEST_RETRIES:
+    if PENDING["payload"] is not None:
+        # A finished scan the Worker didn't take: re-send the same payload - also when the scan was requested
+        # from the dashboard (the request stays open until the Worker accepts a result). Never rescan Amazon
+        # for it: a rescan every 2 minutes would hammer Amazon from the home IP.
+        if PENDING["tries"] < MAX_INGEST_RETRIES:
+            PENDING["tries"] += 1
+            ok = send_ingest(PENDING["payload"])
+            if ok:
+                PENDING["payload"] = None
+            return 0 if ok else 1
+        PENDING["payload"] = None                       # gave up on it; a new request may scan again
+        if not force:
             return 0
-        PENDING["tries"] += 1
-        ok = send_ingest(PENDING["payload"])
-        if ok:
-            PENDING["payload"] = None
-        return 0 if ok else 1
+    if not force and slot == PENDING["slot"]:
+        return 0                                        # scanned (delivered or given up) - wait for the next slot
     print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
     payload = {"slot": slot, "engine": "home", "version": VERSION, "stores": {}}
     for store in state["stores"]:

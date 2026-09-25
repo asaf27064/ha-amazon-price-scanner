@@ -309,7 +309,7 @@ class ScannerTest(unittest.TestCase):
                 pass
 
         with patch.object(scanner, "StoreClient", Client):
-            res = scanner.check_store({"asin": "B000000001", "cookies": {}}, "de", "ECAM472.50.B")
+            res = scanner.check_store({"asin": "B000000001", "cookies": {}}, "de", "ECAM472.50.B", "")
         self.assertTrue(res["raw"]["status"].startswith("blocked"))
         self.assertIn("de", scanner.load_cooldowns())
 
@@ -343,6 +343,51 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 3)
         self.assertEqual(send.call_args.args[0]["version"], scanner.VERSION)
+
+    # ---- 2.0.2: review findings
+    def test_page_without_model_needs_a_clear_title_match(self):
+        ref = "De'Longhi Eletta Ultra ECAM472.50.B Kaffeevollautomat"
+        self.assertFalse(scanner.page_matches({"title": "Kitchen toaster"}, "ECAM472.50", ref))
+        self.assertFalse(scanner.page_matches({"title": "De'Longhi Eletta Explore ECAM452.57"}, "ECAM472.50", ref))
+        self.assertTrue(scanner.page_matches({"title": "De'Longhi Eletta Ultra macchina da caffè"}, "ECAM472.50", ref))
+        carafe_ref = "De'Longhi Rivelia LatteCrema Cool DLSC032 upgrade kit"
+        self.assertTrue(scanner.page_matches({"title": "De'Longhi Rivelia LatteCrema Cool Upgrade Kit"}, "DLSC032", carafe_ref))
+        self.assertFalse(scanner.page_matches({"title": "Kitchen toaster"}, "ECAM472.50", ""))
+
+    def test_search_that_did_not_load_is_temporary_not_missing(self):
+        class Client:
+            def __init__(self, store, jar):
+                pass
+
+            def product(self, asin, query=""):
+                return {"title": "Other", "details": ["XYZ123"]}
+
+            def search(self, model):
+                raise scanner.SearchFailed()
+
+            def close(self):
+                pass
+
+        with patch.object(scanner, "StoreClient", Client):
+            res = scanner.check_store({"asin": "B000000001", "cookies": {}}, "fr", "ECAM472.50.B", "ref title")
+        self.assertTrue(res["raw"]["status"].startswith("error:"))
+        self.assertNotEqual(res["raw"]["status"], "not listed")
+
+    def test_requested_scan_resends_instead_of_rescanning(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-24 14", "scanRequest": "2026-09-24 20:10"}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot=None, payload=None, tries=0)
+        with patch.object(scanner.requests, "get", return_value=resp), \
+                patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
+                patch.object(scanner, "scan_store", return_value={"jar": "", "items": []}) as scan, \
+                patch.object(scanner, "progress"), patch.object(scanner.time, "sleep"), \
+                patch.object(scanner, "send_ingest", side_effect=[False, True]) as send:
+            self.assertEqual(scanner.main(), 1)          # scanned, upload failed
+            self.assertEqual(scanner.main(), 0)          # still requested: re-sent, NOT rescanned
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(send.call_count, 2)
 
 
 if __name__ == "__main__":

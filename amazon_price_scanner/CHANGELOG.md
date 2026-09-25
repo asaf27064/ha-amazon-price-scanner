@@ -1,3 +1,11 @@
+# 2.0.2
+
+- A finished scan the Worker didn't accept is re-sent (never rescanned) also when the scan was requested from
+  the dashboard.
+- A search page that didn't load (timeout, HTTP error) is a temporary failure, never "not sold in this store".
+- Product checks: a page without any model number matches only when its title clearly matches the user's link
+  (two shared distinctive words); the link's own store is checked first as the reference.
+
 # 2.0.1
 
 - Share one paced request queue across scheduled scans, product checks, searches and seller-offer pages.

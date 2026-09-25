@@ -110,7 +110,7 @@ class BrowserClient:
             self.driver.get(url)
         except TimeoutException:
             self.driver.execute_script("window.stop()")
-            return ""
+            return None                                   # not loaded - the caller treats it as a failure
         try:
             WebDriverWait(self.driver, 15).until(
                 lambda d: d.execute_script("return document.readyState") == "complete")
