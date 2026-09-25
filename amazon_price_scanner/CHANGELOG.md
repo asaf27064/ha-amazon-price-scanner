@@ -1,3 +1,10 @@
+# 2.0.5
+
+- A challenge slows the pace down immediately - for the rest of the scan, every store and product checks too -
+  instead of at the end of the scan.
+- Only really clean scans (no challenge, no page errors, skipped or paused stores, and pages actually read) count
+  towards speeding up; a scan with errors neither speeds up nor resets the pace.
+
 # 2.0.4
 
 - Faster scans without a faster request rate: no extra wait between stores (the shared page queue already paces

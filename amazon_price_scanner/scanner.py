@@ -38,7 +38,7 @@ MIN_REQUEST_DELAY = min(REQUEST_DELAY, max(5, float(os.environ.get("MIN_REQUEST_
 CLEAN_SCANS_TO_SPEED_UP = 3
 PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.4"
+VERSION = "2.0.5"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -350,18 +350,33 @@ def current_delay():
     return load_pace()["delay"]
 
 
-def update_pace(challenges):
-    """After a full scan: slow straight down to the configured delay on any challenge, speed up gently after
-    several clean scans (never below MIN_REQUEST_DELAY)."""
+def slow_down_now():
+    """A challenge: back to the configured (slow) pace right away, for every following page."""
+    save_pace({"delay": REQUEST_DELAY, "clean": 0})
+
+
+def update_pace(challenges, clean):
+    """After a full scan. Any challenge: slow pace. A clean scan (no challenge, no errors / skipped stores, pages
+    actually read) counts towards speeding up - several in a row shorten the gap a little (never below
+    MIN_REQUEST_DELAY). A scan with errors neither speeds up nor resets: it proves nothing about the pace."""
     pace = load_pace()
     if challenges:
         pace = {"delay": REQUEST_DELAY, "clean": 0}
-    else:
+    elif clean:
         pace["clean"] += 1
         if pace["clean"] >= CLEAN_SCANS_TO_SPEED_UP and pace["delay"] > MIN_REQUEST_DELAY:
             pace = {"delay": max(MIN_REQUEST_DELAY, pace["delay"] - PACE_STEP), "clean": 0}
     save_pace(pace)
     return pace
+
+
+def scan_was_clean(stores):
+    """No challenge, no page errors / skipped / paused stores, and at least one product page really read."""
+    items = [i for d in stores.values() for i in d.get("items", [])]
+    bad = sum(1 for i in items if str(i["raw"].get("status", "")).startswith(("error:", "skipped", "blocked")))
+    good = sum(1 for i in items if not i["raw"].get("status") and i["raw"].get("title"))
+    challenges = sum(d.get("stats", {}).get("challenges", 0) for d in stores.values())
+    return challenges, challenges == 0 and bad == 0 and good > 0
 
 
 def serialized_store(fn):
@@ -399,9 +414,11 @@ def amazon_page(store, get):
             if isinstance(raw, dict) and is_blocked(raw):
                 _CHALLENGE_COUNTS[store] += 1
                 set_cooldown(store)
+                slow_down_now()
             return value
         except Blocked:
             set_cooldown(store)
+            slow_down_now()
             raise
         finally:
             _LOAD_SECONDS[store] += time.monotonic() - started
@@ -763,7 +780,7 @@ def main():
         print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
         if not DRY:
             send_partial(slot, store, payload["stores"][store])
-    pace = update_pace(sum(d.get("stats", {}).get("challenges", 0) for d in payload["stores"].values()))
+    pace = update_pace(*scan_was_clean(payload["stores"]))
     print("pace: next gap between pages", pace["delay"], "s", flush=True)
     if DRY:
         print("dry run - not sending")

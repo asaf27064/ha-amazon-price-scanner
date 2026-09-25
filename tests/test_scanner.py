@@ -439,12 +439,12 @@ class ScannerTest(unittest.TestCase):
         with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
             self.assertEqual(scanner.current_delay(), 30.0)
             for _ in range(3):
-                scanner.update_pace(0)
+                scanner.update_pace(0, True)
             self.assertEqual(scanner.current_delay(), 27.5)
             for _ in range(30):
-                scanner.update_pace(0)
+                scanner.update_pace(0, True)
             self.assertEqual(scanner.current_delay(), 20.0)             # never below the floor
-            scanner.update_pace(1)
+            scanner.update_pace(1, False)
             self.assertEqual(scanner.current_delay(), 30.0)             # first challenge: straight back
 
     def test_scan_sends_each_store_and_does_not_wait_between_stores(self):
@@ -461,6 +461,32 @@ class ScannerTest(unittest.TestCase):
             scanner.main()
         self.assertEqual([c.args[1] for c in partial.call_args_list], ["it", "fr", "es"])
         sleep.assert_not_called()
+
+    # ---- 2.0.5
+    def test_challenge_slows_down_immediately(self):
+        with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
+            scanner.save_pace({"delay": 20.0, "clean": 0})
+            scanner.amazon_page("it", lambda: ({"captcha": True}, ""))      # a CAPTCHA in the middle of a scan
+            self.assertEqual(scanner.current_delay(), 30.0)               # the very next page already waits 30 s
+            scanner.save_pace({"delay": 20.0, "clean": 0})
+
+            def blocked():
+                raise scanner.Blocked()
+            with self.assertRaises(scanner.Blocked):
+                scanner.amazon_page("de", blocked)                         # e.g. a product check's search page
+            self.assertEqual(scanner.current_delay(), 30.0)
+
+    def test_scans_with_errors_do_not_speed_up(self):
+        failed = {"it": {"items": [{"raw": {"status": "error: ConnectionError"}}, {"raw": {"status": "skipped (store aborted)"}}],
+                         "stats": {"challenges": 0}}}
+        good = {"it": {"items": [{"raw": {"title": "x", "price": "1€"}}], "stats": {"challenges": 0}}}
+        self.assertEqual(scanner.scan_was_clean(failed), (0, False))
+        self.assertEqual(scanner.scan_was_clean(good), (0, True))
+        with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
+            scanner.save_pace({"delay": 30.0, "clean": 0})
+            for _ in range(3):
+                scanner.update_pace(*scanner.scan_was_clean(failed))
+            self.assertEqual(scanner.current_delay(), 30.0)
 
 
 if __name__ == "__main__":
