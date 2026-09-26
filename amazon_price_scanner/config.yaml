@@ -1,5 +1,5 @@
 name: Amazon Price Scanner
-version: "2.0.6"
+version: "2.0.7"
 slug: amazon_price_scanner
 description: Precise Amazon (EU/UK/US → Israel) price scanner for the private Amazon price tracker
 url: https://github.com/asaf27064/ha-amazon-price-scanner
@@ -18,6 +18,7 @@ options:
   request_delay: 30
   min_request_delay: 20
   check_concurrency: 3
+  challenge_retry_seconds: 90
 schema:
   worker_url: url
   upload_key: password
@@ -26,6 +27,7 @@ schema:
   request_delay: int(5,120)
   min_request_delay: int(5,120)
   check_concurrency: int(1,6)
+  challenge_retry_seconds: int(0,600)
 backup_exclude:
   - "scanner/browser/*/Default/Cache"
   - "scanner/browser/*/Default/Code Cache"

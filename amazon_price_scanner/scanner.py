@@ -38,7 +38,9 @@ MIN_REQUEST_DELAY = min(REQUEST_DELAY, max(5, float(os.environ.get("MIN_REQUEST_
 CLEAN_SCANS_TO_SPEED_UP = 3
 PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
-VERSION = "2.0.6"
+# a store's first challenge in a scan: wait this long and reload that page once before pausing the store
+CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
+VERSION = "2.0.7"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -302,6 +304,8 @@ _LOAD_SECONDS = {store: 0.0 for store in DOMAIN}
 _WAIT_SECONDS = {store: 0.0 for store in DOMAIN}
 _CHALLENGE_COUNTS = {store: 0 for store in DOMAIN}
 _CHALLENGE_DELAYS = {store: [] for store in DOMAIN}  # the pace in effect when each challenge came
+_RETRY_LEFT = {store: True for store in DOMAIN}       # first challenge of a scan: no pause yet, one reload
+_SOFT = {store: False for store in DOMAIN}            # set when the last challenge was left without a pause
 
 
 class Blocked(Exception):
@@ -416,8 +420,12 @@ def amazon_page(store, get):
             if isinstance(raw, dict) and is_blocked(raw):
                 _CHALLENGE_COUNTS[store] += 1
                 _CHALLENGE_DELAYS[store].append(pace_now)
-                set_cooldown(store)
                 slow_down_now()
+                if CHALLENGE_RETRY and _RETRY_LEFT.get(store):
+                    _RETRY_LEFT[store] = False      # the caller reloads this page once; a second challenge pauses
+                    _SOFT[store] = True
+                else:
+                    set_cooldown(store)
             return value
         except Blocked:
             set_cooldown(store)
@@ -455,6 +463,7 @@ def scan_store(state, store, diagnostic=False):
     initial_pages, initial_challenges = _PAGE_COUNTS[store], _CHALLENGE_COUNTS[store]
     initial_load, initial_wait = _LOAD_SECONDS[store], _WAIT_SECONDS[store]
     initial_challenge_delays, delay_start = len(_CHALLENGE_DELAYS[store]), current_delay()
+    _RETRY_LEFT[store], _SOFT[store] = True, False
 
     def result():
         pages = _PAGE_COUNTS[store] - initial_pages
@@ -492,11 +501,16 @@ def scan_store(state, store, diagnostic=False):
                                 from browser_client import BrowserClient
                                 browser = BrowserClient(store, DOMAIN[store], request_cookies(jar, store),
                                                         KEEP_COOKIES, DATA_DIR)
-                            raw, candidate_jar = read_product(session, browser, store, asin, jar)
-                        elif TRANSPORT == "requests":
-                            raw, candidate_jar = read_product(session, None, store, asin, jar)
-                        else:
+                        elif TRANSPORT != "requests":
                             raise ValueError("unknown transport")
+                        raw, candidate_jar = read_product(session, browser, store, asin, jar)
+                        if is_blocked(raw) and _SOFT.pop(store, False):
+                            # Amazon's robot check usually clears on a second load of the same session
+                            print(store, "challenge on the first page; waiting", int(CHALLENGE_RETRY),
+                                  "s and reloading once", flush=True)
+                            _SOFT[store] = False
+                            time.sleep(CHALLENGE_RETRY)
+                            raw, candidate_jar = read_product(session, browser, store, asin, jar)
                         # Accept updated delivery sessions only on real Israel product pages.
                         if (not is_blocked(raw) and raw.get("title")
                                 and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
@@ -717,6 +731,7 @@ def run_debug(state):
 
 
 PENDING = {"slot": None, "payload": None, "tries": 0, "request": None}   # last scan, its unsent payload, the request it served
+FOLLOWUP = {"slot": None, "stores": [], "after": 0.0, "kept": {}}          # stores paused in the last scan, to re-scan
 
 
 def progress(slot, store):
@@ -761,6 +776,11 @@ def main():
     if engine == "cloudflare" and not force:
         return 0                                        # light engine selected - nothing to do
     slot = due_slot(state)
+    if FOLLOWUP["stores"] and not requested:
+        if slot != FOLLOWUP["slot"]:
+            FOLLOWUP["stores"] = []                     # a new slot covers everything anyway
+        elif time.time() >= FOLLOWUP["after"] and PENDING["payload"] is None:
+            return run_followup(state, slot)
     if not force and slot == state.get("lastScanSlot"):
         return 0                                        # this slot was already scanned
     if PENDING["payload"] is not None:
@@ -792,6 +812,42 @@ def main():
         print("dry run - not sending")
         return 0
     PENDING.update(slot=slot, payload=payload, tries=1, request=request)
+    plan_followup(slot, payload)
+    ok = send_ingest(payload)
+    if ok:
+        PENDING["payload"] = None
+    return 0 if ok else 1
+
+
+def plan_followup(slot, payload):
+    """Stores paused by a challenge get one more visit in this slot, right after their pause ends."""
+    now = time.time()
+    paused = [s for s, d in payload["stores"].items() if d.get("stats", {}).get("cooldown_until", 0) > now]
+    if not paused:
+        FOLLOWUP["stores"] = []
+        return
+    FOLLOWUP.update(slot=slot, stores=paused, after=max(payload["stores"][s]["stats"]["cooldown_until"] for s in paused) + 30,
+                    kept={s: d for s, d in payload["stores"].items() if s not in paused})
+    print("paused stores", paused, "- will be scanned again after", datetime.fromtimestamp(FOLLOWUP["after"], IL).strftime("%H:%M"), flush=True)
+
+
+def run_followup(state, slot):
+    """Re-scan only the stores that were paused; the other stores' results from the same slot are re-sent with them."""
+    stores = [s for s in FOLLOWUP["stores"] if s in state["stores"]]
+    FOLLOWUP["stores"] = []                              # one attempt per slot
+    print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning the paused stores again:", stores, flush=True)
+    payload = {"slot": slot, "engine": "home", "version": VERSION, "stores": dict(FOLLOWUP["kept"])}
+    for store in stores:
+        progress(slot, store)
+        payload["stores"][store] = scan_store(state, store)
+        print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
+        if not DRY:
+            send_partial(slot, store, payload["stores"][store])
+    pace = update_pace(*scan_was_clean({s: payload["stores"][s] for s in stores}))
+    print("pace: next gap between pages", pace["delay"], "s", flush=True)
+    if DRY:
+        return 0
+    PENDING.update(slot=slot, payload=payload, tries=1)
     ok = send_ingest(payload)
     if ok:
         PENDING["payload"] = None

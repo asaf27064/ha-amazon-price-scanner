@@ -50,17 +50,17 @@ class ScannerTest(unittest.TestCase):
     def test_stops_store_on_first_challenge_and_persists_cooldown(self):
         with patch.object(scanner, "fetch", return_value=({"captcha": True}, "session-id=bad")) as fetch:
             result = scanner.scan_store(self.state, "it")
-            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(fetch.call_count, 2)                      # 2.0.7: one reload, then the pause
             self.assertEqual(len(result["items"]), 3)
             self.assertEqual(result["jar"], "session-id=original")
             scanner.scan_store(self.state, "it")
-            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(fetch.call_count, 2)                      # still paused: no new page
         self.assertGreater(scanner.load_cooldowns()["it"], scanner.time.time())
 
     def test_rate_limit_stops_store(self):
         with patch.object(scanner, "fetch", return_value=({"status": "http 429"}, "")) as fetch:
             scanner.scan_store(self.state, "it")
-            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(fetch.call_count, 2)                      # 2.0.7: one reload, then the pause
 
     def test_diagnostic_uses_only_one_product(self):
         with patch.object(scanner, "fetch", return_value=(scanner.parse(GOOD), "session-id=new")) as fetch:
@@ -496,6 +496,44 @@ class ScannerTest(unittest.TestCase):
             scanner.amazon_page("uk", lambda: ({"captcha": True}, ""))
             self.assertEqual(scanner._CHALLENGE_DELAYS["uk"][before:], [22.5])   # not the 30 it was reset to
             self.assertEqual(scanner.current_delay(), 30.0)
+
+    # ---- 2.0.7
+    def test_first_challenge_is_reloaded_once_before_pausing(self):
+        good = ({"title": "Product", "to": "Israele", "price": "1€", "captcha": False}, "session-id=original")
+        with patch.object(scanner, "fetch", side_effect=[({"captcha": True}, "session-id=bad"), good, good, good]) as fetch, \
+                patch.object(scanner.time, "sleep") as sleep:
+            result = scanner.scan_store(self.state, "it")
+        self.assertEqual(fetch.call_count, 4)                          # captcha, reload ok, then the other two pages
+        self.assertEqual([i["raw"].get("price") for i in result["items"]], ["1€", "1€", "1€"])
+        self.assertEqual(result["stats"]["challenges"], 1)
+        self.assertNotIn("it", scanner.load_cooldowns())               # no pause
+        self.assertIn(scanner.CHALLENGE_RETRY, [c.args[0] for c in sleep.call_args_list])
+
+    def test_paused_stores_are_scanned_again_after_the_pause(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it", "fr", "uk"], "products": [],
+                 "cookies": {}, "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-26 08", "scanRequest": None}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot="2026-09-26 08", payload=None, tries=1, request=None)
+        kept = {"uk": {"jar": "", "items": [{"product": "x", "asin": "A", "raw": {"title": "t", "price": "1"}}], "stats": {"challenges": 0, "cooldown_until": 0}}}
+        scanner.FOLLOWUP.update(slot="2026-09-26 08", stores=["it", "fr"], after=scanner.time.time() - 1, kept=kept)
+        sent = []
+        with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-26 08"), \
+                patch.object(scanner, "scan_store", return_value={"jar": "", "items": [{"product": "x", "asin": "B", "raw": {"title": "t", "price": "2"}}], "stats": {"challenges": 0, "cooldown_until": 0}}) as scan, \
+                patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), \
+                patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
+            scanner.main()
+        self.assertEqual([c.args[1] for c in scan.call_args_list], ["it", "fr"])   # only the paused stores
+        self.assertEqual(sorted(sent[0]["stores"]), ["fr", "it", "uk"])             # sent with the kept results
+        self.assertEqual(sent[0]["slot"], "2026-09-26 08")
+        self.assertEqual(scanner.FOLLOWUP["stores"], [])
+        # a scan whose stores got paused plans the follow-up
+        payload = {"stores": {"it": {"stats": {"cooldown_until": scanner.time.time() + 3000}}, "uk": {"stats": {"cooldown_until": 0}}}}
+        scanner.plan_followup("2026-09-26 14", payload)
+        self.assertEqual(scanner.FOLLOWUP["stores"], ["it"])
+        self.assertEqual(list(scanner.FOLLOWUP["kept"]), ["uk"])
+        self.assertGreater(scanner.FOLLOWUP["after"], scanner.time.time() + 3000)
+        scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
 
 
 if __name__ == "__main__":

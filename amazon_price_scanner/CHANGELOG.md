@@ -1,3 +1,10 @@
+# 2.0.7
+
+- A store's first challenge in a scan no longer pauses it for an hour right away: the scanner waits
+  `challenge_retry_seconds` (default 90) and reloads that page once. Only a second challenge pauses the store.
+- Stores that were paused get one more visit in the same slot, right after their pause ends - only those stores
+  are scanned again, and the results are sent together with the other stores' results from that scan.
+
 # 2.0.6
 
 - The scan report now includes the pace each store started at and the pace each challenge came at (not only the pace

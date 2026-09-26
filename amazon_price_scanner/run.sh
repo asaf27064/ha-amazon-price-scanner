@@ -18,6 +18,10 @@ fi
 if bashio::config.has_value 'request_delay'; then
     export REQUEST_DELAY="$(bashio::config 'request_delay')"
 fi
+export CHALLENGE_RETRY_SECONDS=90
+if bashio::config.has_value 'challenge_retry_seconds'; then
+    export CHALLENGE_RETRY_SECONDS="$(bashio::config 'challenge_retry_seconds')"
+fi
 export DATA_DIR=/data/scanner
 export HOME=/data/scanner/home
 mkdir -p "$DATA_DIR" "$HOME"
