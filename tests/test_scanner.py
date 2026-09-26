@@ -525,6 +525,7 @@ class ScannerTest(unittest.TestCase):
             scanner.main()
         self.assertEqual([c.args[1] for c in scan.call_args_list], ["it", "fr"])   # only the paused stores
         self.assertEqual(sorted(sent[0]["stores"]), ["fr", "it", "uk"])             # sent with the kept results
+        self.assertNotIn("kept", sent[0]["stores"]["it"])
         self.assertEqual(sent[0]["slot"], "2026-09-26 08")
         self.assertEqual(scanner.FOLLOWUP["stores"], [])
         # a scan whose stores got paused plans the follow-up
@@ -532,8 +533,71 @@ class ScannerTest(unittest.TestCase):
         scanner.plan_followup("2026-09-26 14", payload)
         self.assertEqual(scanner.FOLLOWUP["stores"], ["it"])
         self.assertEqual(list(scanner.FOLLOWUP["kept"]), ["uk"])
+        self.assertTrue(scanner.FOLLOWUP["kept"]["uk"]["kept"])                       # marked, with its own time
+        self.assertRegex(scanner.FOLLOWUP["kept"]["uk"]["observed"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
         self.assertGreater(scanner.FOLLOWUP["after"], scanner.time.time() + 3000)
         scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
+
+    # ---- 2.0.9
+    def test_home_page_goes_through_the_paced_queue_and_its_challenge_pauses_the_store(self):
+        import types
+        calls = []
+
+        class FakeBrowser:
+            def __init__(self, *a):
+                self.warm = True
+
+            def needs_warm_up(self):
+                return self.warm
+
+            def warm_up(self, parse):
+                calls.append("home")
+                self.warm = False
+                return {"captcha": True, "title": ""}
+
+            def fetch(self, asin, parse, jar, query=""):
+                calls.append("product")
+                return {"title": "Product", "to": "Israele", "price": "1€", "captcha": False}, jar
+
+            def close(self):
+                pass
+        fake = types.ModuleType("browser_client")
+        fake.BrowserClient = FakeBrowser
+        with patch.dict(scanner.sys.modules, {"browser_client": fake}), patch.object(scanner, "TRANSPORT", "browser"), \
+                patch.object(scanner.time, "sleep") as sleep:
+            result = scanner.scan_store(self.state, "it")
+        self.assertEqual(calls, ["home", "home"])                       # home, reload once, no product page
+        self.assertEqual(result["stats"]["requested_pages"], 2)
+        self.assertEqual(result["stats"]["challenges"], 2)
+        self.assertGreaterEqual(result["stats"]["wait_seconds"], scanner.CHALLENGE_RETRY)   # the wait is accounted
+        self.assertTrue(all(i["raw"]["status"] == "blocked (store cooldown)" for i in result["items"]))
+        self.assertGreater(scanner.load_cooldowns()["it"], scanner.time.time())
+        self.assertIn(scanner.CHALLENGE_RETRY, [c.args[0] for c in sleep.call_args_list])
+
+    def test_undelivered_followup_is_resent_even_when_the_slot_counts_as_scanned(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-26 08", "scanRequest": None}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        payload = {"slot": "2026-09-26 08", "stores": {}}
+        scanner.PENDING.update(slot="2026-09-26 08", payload=payload, tries=1, request=None)
+        scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
+        with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-26 08"), \
+                patch.object(scanner, "scan_store") as scan, patch.object(scanner, "send_ingest", return_value=True) as send:
+            scanner.main()
+        send.assert_called_once_with(payload)
+        scan.assert_not_called()
+        self.assertIsNone(scanner.PENDING["payload"])
+
+    def test_partial_scan_never_counts_as_clean(self):
+        with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
+            scanner.save_pace({"delay": 30.0, "clean": 2})
+            state = {"stores": ["it"], "products": [], "cookies": {}}
+            scanner.FOLLOWUP.update(slot="s", stores=["it"], after=0.0, kept={})
+            with patch.object(scanner, "scan_store", return_value={"jar": "", "items": [{"product": "x", "asin": "A", "raw": {"title": "t", "price": "1"}}], "stats": {"challenges": 0, "cooldown_until": 0}}), \
+                    patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner, "send_ingest", return_value=True):
+                scanner.run_followup(state, "s")
+            self.assertEqual(scanner.load_pace(), {"delay": 30.0, "clean": 2})    # unchanged: not a full clean scan
 
 
 if __name__ == "__main__":

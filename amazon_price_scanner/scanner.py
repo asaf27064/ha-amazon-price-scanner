@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.0.8"
+VERSION = "2.0.9"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -465,6 +465,18 @@ def scan_store(state, store, diagnostic=False):
     initial_challenge_delays, delay_start = len(_CHALLENGE_DELAYS[store]), current_delay()
     _RETRY_LEFT[store], _SOFT[store] = True, False
 
+    def once_with_retry(read):
+        """A store's first challenge: wait, then load that page once more (Amazon's robot check usually clears)."""
+        value = read()
+        raw = value[0] if isinstance(value, tuple) else value
+        if is_blocked(raw) and _SOFT.pop(store, False):
+            print(store, "challenge; waiting", int(CHALLENGE_RETRY), "s and reloading once", flush=True)
+            _SOFT[store] = False
+            _WAIT_SECONDS[store] += CHALLENGE_RETRY
+            time.sleep(CHALLENGE_RETRY)
+            value = read()
+        return value
+
     def result():
         pages = _PAGE_COUNTS[store] - initial_pages
         stats = {"requested_pages": pages,
@@ -501,16 +513,15 @@ def scan_store(state, store, diagnostic=False):
                                 from browser_client import BrowserClient
                                 browser = BrowserClient(store, DOMAIN[store], request_cookies(jar, store),
                                                         KEEP_COOKIES, DATA_DIR)
+                            if browser.needs_warm_up():
+                                # the store's home page first, as its own paced and counted page; a challenge
+                                # there is handled exactly like one on a product page (reload once, then pause)
+                                home = once_with_retry(lambda: amazon_page(store, lambda: browser.warm_up(parse)))
+                                if is_blocked(home):
+                                    raise Blocked()
                         elif TRANSPORT != "requests":
                             raise ValueError("unknown transport")
-                        raw, candidate_jar = read_product(session, browser, store, asin, jar)
-                        if is_blocked(raw) and _SOFT.pop(store, False):
-                            # Amazon's robot check usually clears on a second load of the same session
-                            print(store, "challenge on the first page; waiting", int(CHALLENGE_RETRY),
-                                  "s and reloading once", flush=True)
-                            _SOFT[store] = False
-                            time.sleep(CHALLENGE_RETRY)
-                            raw, candidate_jar = read_product(session, browser, store, asin, jar)
+                        raw, candidate_jar = once_with_retry(lambda: read_product(session, browser, store, asin, jar))
                         # Accept updated delivery sessions only on real Israel product pages.
                         if (not is_blocked(raw) and raw.get("title")
                                 and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
@@ -776,17 +787,11 @@ def main():
     if engine == "cloudflare" and not force:
         return 0                                        # light engine selected - nothing to do
     slot = due_slot(state)
-    if FOLLOWUP["stores"] and not requested:
-        if slot != FOLLOWUP["slot"]:
-            FOLLOWUP["stores"] = []                     # a new slot covers everything anyway
-        elif time.time() >= FOLLOWUP["after"] and PENDING["payload"] is None:
-            return run_followup(state, slot)
-    if not force and slot == state.get("lastScanSlot"):
-        return 0                                        # this slot was already scanned
     if PENDING["payload"] is not None:
         # A finished scan the Worker didn't take: re-send the same payload - also when the scan was requested
-        # from the dashboard (the request stays open until the Worker accepts a result). Never rescan Amazon
-        # for it: a rescan every 2 minutes would hammer Amazon from the home IP.
+        # from the dashboard (the request stays open until the Worker accepts a result), and also when the slot
+        # already counts as scanned (a follow-up's result). Never rescan Amazon for it: a rescan every 2 minutes
+        # would hammer Amazon from the home IP.
         if PENDING["tries"] < MAX_INGEST_RETRIES:
             PENDING["tries"] += 1
             ok = send_ingest(PENDING["payload"])
@@ -796,6 +801,13 @@ def main():
         PENDING["payload"] = None                       # gave up on it; a new request may scan again
         if not force:
             return 0
+    if FOLLOWUP["stores"] and not requested:
+        if slot != FOLLOWUP["slot"]:
+            FOLLOWUP["stores"] = []                     # a new slot covers everything anyway
+        elif time.time() >= FOLLOWUP["after"]:
+            return run_followup(state, slot)
+    if not force and slot == state.get("lastScanSlot"):
+        return 0                                        # this slot was already scanned
     if not force and slot == PENDING["slot"]:
         return 0                                        # scanned (delivered or given up) - wait for the next slot
     print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
@@ -826,8 +838,9 @@ def plan_followup(slot, payload):
     if not paused:
         FOLLOWUP["stores"] = []
         return
+    observed = datetime.now(IL).strftime("%Y-%m-%d %H:%M")
     FOLLOWUP.update(slot=slot, stores=paused, after=max(payload["stores"][s]["stats"]["cooldown_until"] for s in paused) + 30,
-                    kept={s: d for s, d in payload["stores"].items() if s not in paused})
+                    kept={s: {**d, "kept": True, "observed": observed} for s, d in payload["stores"].items() if s not in paused})
     print("paused stores", paused, "- will be scanned again after", datetime.fromtimestamp(FOLLOWUP["after"], IL).strftime("%H:%M"), flush=True)
 
 
@@ -843,7 +856,8 @@ def run_followup(state, slot):
         print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
         if not DRY:
             send_partial(slot, store, payload["stores"][store])
-    pace = update_pace(*scan_was_clean({s: payload["stores"][s] for s in stores}))
+    challenges, _clean = scan_was_clean({s: payload["stores"][s] for s in stores})
+    pace = update_pace(challenges, False)                # a partial scan never counts as a clean full scan
     print("pace: next gap between pages", pace["delay"], "s", flush=True)
     if DRY:
         return 0

@@ -106,20 +106,35 @@ class BrowserSessionTest(unittest.TestCase):
         self.assertIn(("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Jerusalem"}), driver.cdp)
         client.close()
 
-    def test_home_page_first_after_a_break_then_links(self):
+    def test_home_page_is_a_separate_step_then_pages_are_links(self):
         driver = Driver()
         client = self.client(driver, "session-id=original")
+        self.assertTrue(client.needs_warm_up())                                          # cold profile
+        home = client.warm_up(lambda html: {"title": "", "captcha": False})
+        self.assertEqual(home["transport"], "browser")
+        self.assertFalse(client.needs_warm_up())                                         # noted the visit
         client.fetch("B000000001", lambda html: {"title": "Product", "captcha": False}, "")
         client.fetch("B000000002", lambda html: {"title": "Product", "captcha": False}, "")
-        self.assertEqual(driver.visited, [("typed", "https://www.amazon.it/"),            # cold: the home page first
+        self.assertEqual(driver.visited, [("typed", "https://www.amazon.it/"),
                                           ("link", "https://www.amazon.it/dp/B000000001"),
                                           ("link", "https://www.amazon.it/dp/B000000002")])
         client.close()
-        # a warm profile goes straight to the product, still as a link when a store page is open
+        # a fresh browser on a recently used profile: no home page, the first product is opened directly
         driver2 = Driver()
-        driver2.current_url = "https://www.amazon.it/dp/B000000002"
         client2 = self.client(driver2, "session-id=original")
+        self.assertFalse(client2.needs_warm_up())
         client2.fetch("B000000003", lambda html: {"title": "Product", "captcha": False}, "")
-        self.assertEqual(driver2.visited, [("link", "https://www.amazon.it/dp/B000000003")])
+        client2.fetch("B000000004", lambda html: {"title": "Product", "captcha": False}, "")
+        self.assertEqual(driver2.visited, [("typed", "https://www.amazon.it/dp/B000000003"),
+                                          ("link", "https://www.amazon.it/dp/B000000004")])
         client2.close()
+
+    def test_client_hints_agree_with_the_user_agent(self):
+        driver = Driver()
+        client = self.client(driver, "session-id=original")
+        meta = [a["userAgentMetadata"] for m, a in driver.cdp if m == "Network.setUserAgentOverride"][0]
+        self.assertEqual(meta["fullVersion"], "131.0.0.0")
+        self.assertIn({"brand": "Chromium", "version": "131"}, meta["brands"])
+        self.assertFalse(meta["mobile"])
+        client.close()
 

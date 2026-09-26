@@ -1,6 +1,7 @@
 """A persistent, anonymous Chromium session per Amazon marketplace - presented like an ordinary desktop browser."""
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -68,9 +69,16 @@ class BrowserClient:
         try:
             ua = self.driver.execute_script("return navigator.userAgent") or ""
             if "HeadlessChrome" in ua:
+                m = re.search(r"HeadlessChrome/((\d+)[\d.]*)", ua)
+                major, full = (m.group(2), m.group(1)) if m else ("120", "120.0.0.0")
+                # the client-hint headers must agree with the user agent (Sec-CH-UA and friends)
                 self.driver.execute_cdp_cmd("Network.setUserAgentOverride", {
                     "userAgent": ua.replace("HeadlessChrome", "Chrome"),
-                    "acceptLanguage": f"{self.locale},{self.locale[:2]};q=0.9,en;q=0.8"})
+                    "acceptLanguage": f"{self.locale},{self.locale[:2]};q=0.9,en;q=0.8",
+                    "userAgentMetadata": {"brands": [{"brand": "Chromium", "version": major}, {"brand": "Not_A Brand", "version": "24"}],
+                                          "fullVersionList": [{"brand": "Chromium", "version": full}, {"brand": "Not_A Brand", "version": "24.0.0.0"}],
+                                          "fullVersion": full, "platform": "Linux", "platformVersion": "", "architecture": "x86",
+                                          "model": "", "mobile": False, "bitness": "64", "wow64": False}})
             self.driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": TIMEZONE})
         except Exception as e:
             print("browser: could not adjust the presentation:", type(e).__name__, flush=True)
@@ -94,15 +102,26 @@ class BrowserClient:
         except TimeoutException:
             pass
 
+    def needs_warm_up(self):
+        """A store not visited for a while: a person would open the store first, not a product page."""
+        return time.time() - self._last_visit() > WARM_UP_AFTER
+
+    def warm_up(self, parse):
+        """The store's home page - one paced, counted page like any other; the caller checks it for a challenge."""
+        try:
+            self.driver.get(self.origin + "/")
+        except TimeoutException:
+            self.driver.execute_script("window.stop()")
+            return {"status": "error: browser navigation timeout"}
+        self._wait_loaded()
+        self._note_visit()
+        raw = parse(self.driver.page_source)
+        raw["transport"] = "browser"
+        return raw
+
     def _navigate(self, url):
-        """Open a page the way a person gets there: after a long break the store's home page comes first, and the
-        next page is reached from the current one (so it carries a referrer) instead of a typed address."""
-        if time.time() - self._last_visit() > WARM_UP_AFTER:
-            try:
-                self.driver.get(self.origin + "/")
-                self._wait_loaded()
-            except TimeoutException:
-                self.driver.execute_script("window.stop()")
+        """Open a page the way a person gets there: from the current store page when one is open (so it carries a
+        referrer); a fresh browser opens it directly, like a bookmark."""
         on_site = False
         try:
             on_site = str(self.driver.current_url or "").startswith(self.origin)

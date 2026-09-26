@@ -1,3 +1,12 @@
+# 2.0.9
+
+- The store's home page (opened after a 3-hour break) is now its own paced, counted page, and a challenge on it
+  is handled like any other (one reload, then the pause) instead of being passed over.
+- A follow-up sends the earlier stores' results marked as kept, with the time they were really read; the site
+  shows them with that time and counts only the newly read pages. A partial scan never counts as a clean scan.
+- An undelivered result is re-sent even after the slot already counts as scanned.
+- The browser's client-hint headers now agree with its user agent. The reload wait is included in the wait time.
+
 # 2.0.8
 
 - The browser presents itself like an ordinary desktop Chromium: no "automated software" switch or
