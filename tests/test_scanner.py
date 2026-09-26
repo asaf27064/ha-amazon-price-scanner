@@ -547,6 +547,15 @@ class ScannerTest(unittest.TestCase):
         self.assertGreater(scanner.FOLLOWUP["after"], scanner.time.time() + 3000)
         scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
 
+    # ---- 2.0.12
+    def test_missing_pages_do_not_abort_the_store(self):
+        missing = ({"status": "error: product page missing"}, "session-id=original")
+        good = ({"title": "Product", "to": "Israele", "price": "1€", "captcha": False}, "session-id=original")
+        with patch.object(scanner, "fetch", side_effect=[missing, missing, good]) as fetch:
+            result = scanner.scan_store(self.state, "it")
+        self.assertEqual(fetch.call_count, 3)                                       # the third page was still read
+        self.assertEqual([i["raw"].get("status") for i in result["items"]], ["error: product page missing", "error: product page missing", None])
+
     # ---- 2.0.10
     def test_image_from_the_page_image_list_when_the_main_image_has_no_hires(self):
         html = ('<title>Product</title><span id="productTitle">Product</span><img id="landingImage" src="data:image/gif;base64,R0lGOD">'

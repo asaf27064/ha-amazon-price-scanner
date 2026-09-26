@@ -1,3 +1,8 @@
+# 2.0.12
+
+- A product page that doesn't exist in a store (a variant Amazon doesn't sell there) no longer counts towards
+  "two errors in a row" - so a product with many variants can't make the scanner give up on a store.
+
 # 2.0.11
 
 - A scan result tells the site when the scan started and which "scan now" it served, so a request pressed while a

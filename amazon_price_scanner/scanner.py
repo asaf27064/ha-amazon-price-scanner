@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.0.11"
+VERSION = "2.0.12"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -550,8 +550,8 @@ def scan_store(state, store, diagnostic=False):
                         blocked = True
                         set_cooldown(store)
                         print(store, "blocked; pausing this store for 60 minutes", flush=True)
-                    elif raw.get("status", "").startswith("error:"):
-                        # One missing page (removed ASIN) or one slow page is a per-product result; only a
+                    elif raw.get("status", "").startswith("error:") and raw.get("status") != "error: product page missing":
+                        # A missing page (an ASIN this store doesn't have) is a result, not a failure. Only a
                         # driver/network that keeps failing stops the store (not restarted once per product).
                         errors_in_row += 1
                         if errors_in_row >= 2:
