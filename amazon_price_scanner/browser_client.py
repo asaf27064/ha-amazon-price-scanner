@@ -1,6 +1,7 @@
 """A persistent, anonymous Chromium session per Amazon marketplace - presented like an ordinary desktop browser."""
 import json
 import os
+import platform
 import re
 import time
 from pathlib import Path
@@ -71,14 +72,17 @@ class BrowserClient:
             if "HeadlessChrome" in ua:
                 m = re.search(r"HeadlessChrome/((\d+)[\d.]*)", ua)
                 major, full = (m.group(2), m.group(1)) if m else ("120", "120.0.0.0")
+                machine = platform.machine().lower()      # the add-on runs on amd64, aarch64 and armv7 hosts
+                arch = "arm" if machine.startswith(("aarch64", "arm")) else "x86"
+                bits = "64" if ("64" in machine) else "32"
                 # the client-hint headers must agree with the user agent (Sec-CH-UA and friends)
                 self.driver.execute_cdp_cmd("Network.setUserAgentOverride", {
                     "userAgent": ua.replace("HeadlessChrome", "Chrome"),
                     "acceptLanguage": f"{self.locale},{self.locale[:2]};q=0.9,en;q=0.8",
                     "userAgentMetadata": {"brands": [{"brand": "Chromium", "version": major}, {"brand": "Not_A Brand", "version": "24"}],
                                           "fullVersionList": [{"brand": "Chromium", "version": full}, {"brand": "Not_A Brand", "version": "24.0.0.0"}],
-                                          "fullVersion": full, "platform": "Linux", "platformVersion": "", "architecture": "x86",
-                                          "model": "", "mobile": False, "bitness": "64", "wow64": False}})
+                                          "fullVersion": full, "platform": "Linux", "platformVersion": "", "architecture": arch,
+                                          "model": "", "mobile": False, "bitness": bits, "wow64": False}})
             self.driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": TIMEZONE})
         except Exception as e:
             print("browser: could not adjust the presentation:", type(e).__name__, flush=True)

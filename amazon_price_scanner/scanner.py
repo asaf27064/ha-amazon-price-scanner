@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.0.9"
+VERSION = "2.0.10"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -106,7 +106,12 @@ def parse(html):
     captcha = (soup.select_one('form[action*="validateCaptcha"], #captchacharacters') is not None
                or bool(re.search(r"robot check|captcha", page_title, re.I)))
     img = soup.select_one("#landingImage")
-    image = (img.get("data-old-hires") or img.get("src") or "") if img else ""
+    image = (img.get("data-old-hires") or "") if img else ""
+    if not image.startswith("https://"):                  # the page's image list, else the img src
+        m = re.search(r'"hiRes":"(https:[^"]+)"', html) or re.search(r'"large":"(https://m\.media-amazon\.com[^"]+)"', html)
+        image = m.group(1) if m else ((img.get("src") or "") if img else "")
+    if not image.startswith("https://"):
+        image = ""
     # item-details model numbers (tables and bullet lists)
     details = []
     for th in soup.select("table th"):
@@ -838,18 +843,16 @@ def plan_followup(slot, payload):
     if not paused:
         FOLLOWUP["stores"] = []
         return
-    observed = datetime.now(IL).strftime("%Y-%m-%d %H:%M")
-    FOLLOWUP.update(slot=slot, stores=paused, after=max(payload["stores"][s]["stats"]["cooldown_until"] for s in paused) + 30,
-                    kept={s: {**d, "kept": True, "observed": observed} for s, d in payload["stores"].items() if s not in paused})
+    FOLLOWUP.update(slot=slot, stores=paused, after=max(payload["stores"][s]["stats"]["cooldown_until"] for s in paused) + 30, kept={})
     print("paused stores", paused, "- will be scanned again after", datetime.fromtimestamp(FOLLOWUP["after"], IL).strftime("%H:%M"), flush=True)
 
 
 def run_followup(state, slot):
-    """Re-scan only the stores that were paused; the other stores' results from the same slot are re-sent with them."""
+    """Re-scan only the stores that were paused and send just those; the site keeps the other stores as they are."""
     stores = [s for s in FOLLOWUP["stores"] if s in state["stores"]]
     FOLLOWUP["stores"] = []                              # one attempt per slot
     print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning the paused stores again:", stores, flush=True)
-    payload = {"slot": slot, "engine": "home", "version": VERSION, "stores": dict(FOLLOWUP["kept"])}
+    payload = {"slot": slot, "engine": "home", "version": VERSION, "stores": {}}
     for store in stores:
         progress(slot, store)
         payload["stores"][store] = scan_store(state, store)

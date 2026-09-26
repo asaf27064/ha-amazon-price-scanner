@@ -524,19 +524,25 @@ class ScannerTest(unittest.TestCase):
                 patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
             scanner.main()
         self.assertEqual([c.args[1] for c in scan.call_args_list], ["it", "fr"])   # only the paused stores
-        self.assertEqual(sorted(sent[0]["stores"]), ["fr", "it", "uk"])             # sent with the kept results
-        self.assertNotIn("kept", sent[0]["stores"]["it"])
+        self.assertEqual(sorted(sent[0]["stores"]), ["fr", "it"])                   # only the stores read again
         self.assertEqual(sent[0]["slot"], "2026-09-26 08")
         self.assertEqual(scanner.FOLLOWUP["stores"], [])
         # a scan whose stores got paused plans the follow-up
         payload = {"stores": {"it": {"stats": {"cooldown_until": scanner.time.time() + 3000}}, "uk": {"stats": {"cooldown_until": 0}}}}
         scanner.plan_followup("2026-09-26 14", payload)
         self.assertEqual(scanner.FOLLOWUP["stores"], ["it"])
-        self.assertEqual(list(scanner.FOLLOWUP["kept"]), ["uk"])
-        self.assertTrue(scanner.FOLLOWUP["kept"]["uk"]["kept"])                       # marked, with its own time
-        self.assertRegex(scanner.FOLLOWUP["kept"]["uk"]["observed"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+        self.assertEqual(scanner.FOLLOWUP["kept"], {})
         self.assertGreater(scanner.FOLLOWUP["after"], scanner.time.time() + 3000)
         scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
+
+    # ---- 2.0.10
+    def test_image_from_the_page_image_list_when_the_main_image_has_no_hires(self):
+        html = ('<title>Product</title><span id="productTitle">Product</span><img id="landingImage" src="data:image/gif;base64,R0lGOD">'
+                '<script>var data = {"colorImages":{"initial":[{"hiRes":"https://m.media-amazon.com/images/I/81x._AC_SL1500_.jpg","large":"https://m.media-amazon.com/images/I/81x.jpg"}]}};</script>')
+        self.assertEqual(scanner.parse(html)["image"], "https://m.media-amazon.com/images/I/81x._AC_SL1500_.jpg")
+        self.assertEqual(scanner.parse('<title>P</title><img id="landingImage" data-old-hires="https://m.media-amazon.com/images/I/a.jpg">')["image"],
+                         "https://m.media-amazon.com/images/I/a.jpg")
+        self.assertEqual(scanner.parse('<title>P</title><img id="landingImage" src="data:image/gif;base64,R0">')["image"], "")
 
     # ---- 2.0.9
     def test_home_page_goes_through_the_paced_queue_and_its_challenge_pauses_the_store(self):

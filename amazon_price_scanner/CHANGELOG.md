@@ -1,3 +1,9 @@
+# 2.0.10
+
+- A follow-up sends only the stores it read again (the site keeps the others as they are).
+- The product image is found on pages whose main image carries no hi-res attribute (the page's image list is used).
+- The browser's client-hint architecture follows the real host CPU (amd64 / aarch64 / armv7).
+
 # 2.0.9
 
 - The store's home page (opened after a 3-hour break) is now its own paced, counted page, and a challenge on it
