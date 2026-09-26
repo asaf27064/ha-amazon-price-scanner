@@ -1,3 +1,8 @@
+# 2.0.11
+
+- A scan result tells the site when the scan started and which "scan now" it served, so a request pressed while a
+  scan was already running is kept and served by the next run instead of being dropped.
+
 # 2.0.10
 
 - A follow-up sends only the stores it read again (the site keeps the others as they are).

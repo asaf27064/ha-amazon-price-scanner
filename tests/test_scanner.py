@@ -462,6 +462,18 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual([c.args[1] for c in partial.call_args_list], ["it", "fr", "es"])
         sleep.assert_not_called()
 
+    def test_result_says_when_it_started_and_which_request_it_served(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-24 14", "scanRequest": "2026-09-24 19:50"}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot=None, payload=None, tries=0, request=None)
+        sent = []
+        with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-24 20"),                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"challenges": 0, "cooldown_until": 0}}),                 patch.object(scanner, "progress"), patch.object(scanner, "send_partial"),                 patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
+            scanner.main()
+        self.assertEqual(sent[0]["request"], "2026-09-24 19:50")
+        self.assertRegex(sent[0]["started"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+
     # ---- 2.0.5
     def test_challenge_slows_down_immediately(self):
         with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):

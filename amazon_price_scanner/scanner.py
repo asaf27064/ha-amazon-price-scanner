@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.0.10"
+VERSION = "2.0.11"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
@@ -815,8 +815,10 @@ def main():
         return 0                                        # this slot was already scanned
     if not force and slot == PENDING["slot"]:
         return 0                                        # scanned (delivered or given up) - wait for the next slot
-    print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
-    payload = {"slot": slot, "engine": "home", "version": VERSION, "stores": {}}
+    started = datetime.now(IL).strftime("%Y-%m-%d %H:%M")
+    print(started, "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
+    # "started" and "request": the site keeps a "scan now" pressed while this scan was already running
+    payload = {"slot": slot, "engine": "home", "version": VERSION, "started": started, "request": request, "stores": {}}
     for store in state["stores"]:
         progress(slot, store)
         payload["stores"][store] = scan_store(state, store)
@@ -852,7 +854,8 @@ def run_followup(state, slot):
     stores = [s for s in FOLLOWUP["stores"] if s in state["stores"]]
     FOLLOWUP["stores"] = []                              # one attempt per slot
     print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning the paused stores again:", stores, flush=True)
-    payload = {"slot": slot, "engine": "home", "version": VERSION, "stores": {}}
+    payload = {"slot": slot, "engine": "home", "version": VERSION, "started": datetime.now(IL).strftime("%Y-%m-%d %H:%M"),
+               "request": None, "stores": {}}
     for store in stores:
         progress(slot, store)
         payload["stores"][store] = scan_store(state, store)
