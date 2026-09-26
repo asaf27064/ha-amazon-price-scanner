@@ -1,3 +1,11 @@
+# 2.0.8
+
+- The browser presents itself like an ordinary desktop Chromium: no "automated software" switch or
+  navigator.webdriver flag, the headless label removed from the user agent, the household's time zone, and
+  common fonts installed in the image.
+- Pages are reached the way a person reaches them: a store not visited for 3 hours gets its home page first, and
+  the next page is opened from the current one (so it carries a referrer) instead of as a typed address.
+
 # 2.0.7
 
 - A store's first challenge in a scan no longer pauses it for an hour right away: the scanner waits

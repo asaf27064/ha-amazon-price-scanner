@@ -11,13 +11,48 @@ spec.loader.exec_module(browser)
 
 
 class Driver:
-    def __init__(self, cookies=()):
-        self.cookies = list(cookies)
-
     def set_page_load_timeout(self, seconds):
         pass
 
+    current_url = "about:blank"
+    ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/131.0.0.0 Safari/537.36"
+
+    def __init__(self, cookies=()):
+        self.cookies = list(cookies)
+        self.cdp = []
+        self.visited = []
+
+    def execute_script(self, script, *args):
+        if "navigator.userAgent" in script:
+            return self.ua
+        if "readyState" in script:
+            return "complete"
+        if "location.assign" in script:
+            self.visited.append(("link", args[0]))
+            self.current_url = args[0]
+            return None
+        if "__leaving" in script:
+            return None                                   # the new page has no marker: navigation done
+        return None
+
+    def get(self, url):
+        self.visited.append(("typed", url))
+        self.current_url = url
+
+    def find_elements(self, *a):
+        return [1]
+
+    @property
+    def page_source(self):
+        return "<title>Product</title>"
+
+    def get_cookies(self):
+        return []
+
     def execute_cdp_cmd(self, method, args):
+        self.cdp.append((method, args))
+        if method in ("Network.setUserAgentOverride", "Emulation.setTimezoneOverride"):
+            return {}
         if method == "Network.getCookies":
             return {"cookies": self.cookies}
         if method == "Network.setCookie":
@@ -59,3 +94,32 @@ class BrowserSessionTest(unittest.TestCase):
         client = self.client(driver, "session-id=original; auth-token=private")
         self.assertEqual([c["name"] for c in driver.cookies], ["session-id"])
         client.close()
+
+    # ---- 2.0.8
+    def test_presents_like_an_ordinary_browser(self):
+        driver = Driver()
+        client = self.client(driver, "session-id=original")
+        ua = [a["userAgent"] for m, a in driver.cdp if m == "Network.setUserAgentOverride"]
+        self.assertEqual(len(ua), 1)
+        self.assertNotIn("Headless", ua[0])
+        self.assertIn("Chrome/131", ua[0])
+        self.assertIn(("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Jerusalem"}), driver.cdp)
+        client.close()
+
+    def test_home_page_first_after_a_break_then_links(self):
+        driver = Driver()
+        client = self.client(driver, "session-id=original")
+        client.fetch("B000000001", lambda html: {"title": "Product", "captcha": False}, "")
+        client.fetch("B000000002", lambda html: {"title": "Product", "captcha": False}, "")
+        self.assertEqual(driver.visited, [("typed", "https://www.amazon.it/"),            # cold: the home page first
+                                          ("link", "https://www.amazon.it/dp/B000000001"),
+                                          ("link", "https://www.amazon.it/dp/B000000002")])
+        client.close()
+        # a warm profile goes straight to the product, still as a link when a store page is open
+        driver2 = Driver()
+        driver2.current_url = "https://www.amazon.it/dp/B000000002"
+        client2 = self.client(driver2, "session-id=original")
+        client2.fetch("B000000003", lambda html: {"title": "Product", "captcha": False}, "")
+        self.assertEqual(driver2.visited, [("link", "https://www.amazon.it/dp/B000000003")])
+        client2.close()
+

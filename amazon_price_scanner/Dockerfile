@@ -2,7 +2,7 @@ ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.22
 FROM $BUILD_FROM
 # Alpine packages - no compilation needed on the Home Assistant host
 RUN apk add --no-cache python3 py3-pip py3-requests py3-beautifulsoup4 py3-lxml tzdata \
-    chromium chromium-chromedriver su-exec \
+    chromium chromium-chromedriver su-exec ttf-dejavu font-noto \
     && python3 -m venv --system-site-packages /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir selenium==4.49.0 \
     && addgroup -S scanner && adduser -S -G scanner scanner

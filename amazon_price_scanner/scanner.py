@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.0.7"
+VERSION = "2.0.8"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned

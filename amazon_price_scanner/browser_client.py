@@ -1,12 +1,16 @@
-"""A persistent, anonymous Chromium session per Amazon marketplace."""
+"""A persistent, anonymous Chromium session per Amazon marketplace - presented like an ordinary desktop browser."""
 import json
 import os
+import time
 from pathlib import Path
 
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
+
+WARM_UP_AFTER = 3 * 3600      # a store not visited for this long gets its home page first, like a person would
+TIMEZONE = "Asia/Jerusalem"
 
 
 class BrowserClient:
@@ -29,12 +33,18 @@ class BrowserClient:
         # Chromium's namespace sandbox cannot nest inside HA's restricted container.
         # Run as the dedicated scanner user within the add-on's container isolation.
         options.add_argument("--no-sandbox")
-        # Keep Chromium's real user agent, TLS stack, JavaScript and cookie handling.
+        # An ordinary browser: no "controlled by automated software" switch, no navigator.webdriver flag.
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        # Keep Chromium's real TLS stack, JavaScript and cookie handling.
         options.page_load_strategy = "eager"
+        self.locale = locale
         self.driver = webdriver.Chrome(
             service=Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver")), options=options)
         self.driver.set_page_load_timeout(45)
         try:
+            self._look_ordinary()
             self._restore_session_cookies()
             existing = self.driver.execute_cdp_cmd("Network.getCookies", {"urls": [self.origin]})
             has_session = any(c["name"] == "session-id" for c in existing.get("cookies", []))
@@ -52,6 +62,65 @@ class BrowserClient:
         except Exception:
             self.close()
             raise
+
+    def _look_ordinary(self):
+        """The same Chromium, without the headless label and with the household's time zone."""
+        try:
+            ua = self.driver.execute_script("return navigator.userAgent") or ""
+            if "HeadlessChrome" in ua:
+                self.driver.execute_cdp_cmd("Network.setUserAgentOverride", {
+                    "userAgent": ua.replace("HeadlessChrome", "Chrome"),
+                    "acceptLanguage": f"{self.locale},{self.locale[:2]};q=0.9,en;q=0.8"})
+            self.driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": TIMEZONE})
+        except Exception as e:
+            print("browser: could not adjust the presentation:", type(e).__name__, flush=True)
+
+    def _last_visit(self):
+        try:
+            return float((self.profile / "last-visit").read_text())
+        except (FileNotFoundError, ValueError):
+            return 0.0
+
+    def _note_visit(self):
+        try:
+            (self.profile / "last-visit").write_text(str(time.time()))
+        except OSError:
+            pass
+
+    def _wait_loaded(self):
+        try:
+            WebDriverWait(self.driver, 15).until(
+                lambda d: d.execute_script("return document.readyState") == "complete")
+        except TimeoutException:
+            pass
+
+    def _navigate(self, url):
+        """Open a page the way a person gets there: after a long break the store's home page comes first, and the
+        next page is reached from the current one (so it carries a referrer) instead of a typed address."""
+        if time.time() - self._last_visit() > WARM_UP_AFTER:
+            try:
+                self.driver.get(self.origin + "/")
+                self._wait_loaded()
+            except TimeoutException:
+                self.driver.execute_script("window.stop()")
+        on_site = False
+        try:
+            on_site = str(self.driver.current_url or "").startswith(self.origin)
+        except Exception:
+            pass
+        if on_site:
+            try:
+                self.driver.execute_script("window.__leaving=1;location.assign(arguments[0])", url)
+                WebDriverWait(self.driver, 45).until(lambda d: not d.execute_script("return window.__leaving"))
+                self._note_visit()
+                return
+            except TimeoutException:
+                self.driver.execute_script("window.stop()")
+                raise
+            except Exception:
+                pass                                   # fall back to a plain navigation
+        self.driver.get(url)
+        self._note_visit()
 
     def _restore_session_cookies(self):
         """Chromium saves persistent cookies itself; retain session cookies on restart too."""
@@ -76,7 +145,7 @@ class BrowserClient:
     def fetch(self, asin, parse, original_jar, query=""):
         url = f"{self.origin}/dp/{asin}{query}"
         try:
-            self.driver.get(url)
+            self._navigate(url)
         except TimeoutException:
             # A timed out navigation may still show the previous product. Never use it.
             self.driver.execute_script("window.stop()")
@@ -107,7 +176,7 @@ class BrowserClient:
     def get_html(self, url):
         """Any Amazon page (e.g. search results) after it finished loading."""
         try:
-            self.driver.get(url)
+            self._navigate(url)
         except TimeoutException:
             self.driver.execute_script("window.stop()")
             return None                                   # not loaded - the caller treats it as a failure
