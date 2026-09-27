@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.2"
+VERSION = "2.1.3"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -888,6 +888,9 @@ def main():
         return 0
     engine = state["settings"].get("engine", "cloudflare")
     request = state.get("scanRequest") or None           # "scan now" pressed on the dashboard (its timestamp)
+    # "scan only this product" (a button per product on the dashboard): the Worker's state then lists just that
+    # product - a short scan that is not the slot's scan (the slot's own scan still runs, no follow-up is planned)
+    product_scan = " p:" in str(request or "")
     # a request is served once: if its scan couldn't be delivered, it is re-sent, never scanned again
     requested = bool(request) and request != PENDING["request"]
     force = FORCE or requested
@@ -918,7 +921,7 @@ def main():
     if not force and slot == PENDING["slot"]:
         return 0                                        # scanned (delivered or given up) - wait for the next slot
     started = datetime.now(IL).strftime("%Y-%m-%d %H:%M")
-    print(started, "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
+    print(started, "scanning slot", slot, "(product only)" if product_scan else "(requested)" if requested else "(force)" if FORCE else "", flush=True)
     # "started" and "request": the site keeps a "scan now" pressed while this scan was already running
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": started, "request": request, "stores": {}}
     _BACKOFF["on"] = False
@@ -947,8 +950,9 @@ def main():
     if DRY:
         print("dry run - not sending")
         return 0
-    PENDING.update(slot=slot, payload=payload, tries=1, request=request)
-    plan_followup(slot, payload)
+    PENDING.update(slot=PENDING["slot"] if product_scan else slot, payload=payload, tries=1, request=request)
+    if not product_scan:
+        plan_followup(slot, payload)
     ok = send_ingest(payload)
     if ok:
         PENDING["payload"] = None

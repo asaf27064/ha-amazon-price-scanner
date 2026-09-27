@@ -389,6 +389,23 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
 
+    # ---- 2.1.3
+    def test_product_scan_does_not_take_the_slot(self):
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-24 14", "scanRequest": "2026-09-24 20:01:10 #ab12 p:oral_io9"}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot="2026-09-24 14", payload=None, tries=0, request=None)
+        with patch.object(scanner.requests, "get", return_value=resp),                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"),                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"cooldown_until": scanner.time.time() + 999}}) as scan,                 patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"),                 patch.object(scanner, "send_ingest", return_value=True):
+            scanner.FOLLOWUP["stores"] = []
+            self.assertEqual(scanner.main(), 0)
+            self.assertEqual(scanner.PENDING["slot"], "2026-09-24 14", "a product scan doesn't mark the 20:00 slot as scanned")
+            self.assertEqual(scanner.FOLLOWUP["stores"], [], "no follow-up for a product scan")
+            state["scanRequest"] = None                # request served: the slot's own scan still runs
+            self.assertEqual(scanner.main(), 0)
+            self.assertEqual(scan.call_count, 2)
+            self.assertEqual(scanner.PENDING["slot"], "2026-09-24 20")
+
     # ---- 2.0.3
     def test_same_request_never_scans_twice_even_after_giving_up(self):
         state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},

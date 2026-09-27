@@ -1,3 +1,8 @@
+# 2.1.3
+
+- "Scan only this product" from the dashboard: a short scan of one product in every store. It doesn't count as the
+  slot's scan (the scheduled scan still runs) and plans no follow-up.
+
 # 2.1.2
 
 - The safe queue waits until its next moment stops moving: a second challenge while a page is waiting pushes that
