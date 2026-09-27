@@ -334,7 +334,7 @@ class ScannerTest(unittest.TestCase):
         with patch.object(scanner.requests, "get", return_value=resp), \
                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": []}) as scan, \
-                patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"), \
+                patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"), \
                 patch.object(scanner, "send_ingest", side_effect=[False, False, True]) as send:
             self.assertEqual(scanner.main(), 1)
             self.assertEqual(scanner.main(), 1)
@@ -382,12 +382,65 @@ class ScannerTest(unittest.TestCase):
         with patch.object(scanner.requests, "get", return_value=resp), \
                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": []}) as scan, \
-                patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"), \
+                patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"), \
                 patch.object(scanner, "send_ingest", side_effect=[False, True]) as send:
             self.assertEqual(scanner.main(), 1)          # scanned, upload failed
             self.assertEqual(scanner.main(), 0)          # still requested: re-sent, NOT rescanned
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
+
+    # ---- 2.1.4
+    def test_progress_reports_pages_per_store_throttled(self):
+        state = {"stores": ["it", "fr"], "products": [
+            {"key": "a", "skip": [], "asinsByStore": {"it": ["A1", "A2"], "fr": ["A1"]}},
+            {"key": "b", "skip": ["fr"], "asinsByStore": {"it": ["B1"], "fr": ["B1"]}},
+            {"key": "c", "skip": [], "asinsByStore": {"it": None, "fr": []}}]}
+        sent = []
+        clock = [1000.0]
+        with patch.object(scanner.requests, "post", side_effect=lambda url, **kw: sent.append(kw["json"])),                 patch.object(scanner.time, "time", side_effect=lambda: clock[0]), patch.object(scanner, "DRY", False):
+            scanner.progress_start("2026-09-27 20", state, ["it", "fr"], ["a"])
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["stores"]["it"]["total"], 3)       # a: 2 + b: 1 (c has no pages)
+            self.assertEqual(sent[0]["stores"]["fr"]["total"], 1)       # b skips fr
+            self.assertEqual(sent[0]["only"], ["a"])
+            scanner.progress_store("it", force=False, state="running")
+            scanner.progress_item("it", "a")
+            scanner.progress_item("it", "a", done=True)
+            self.assertEqual(len(sent), 1, "page updates within 12 s are not sent")
+            clock[0] += 13
+            scanner.progress_item("it", "a", done=True)
+            self.assertEqual(len(sent), 2)
+            self.assertEqual(sent[1]["stores"]["it"], {"total": 3, "done": 2, "state": "running", "cur": "a"})
+            self.assertEqual(sent[1]["store"], "it")
+            scanner.store_finished("it", {"stats": {"cooldown_until": 0}})
+            self.assertEqual(sent[2]["stores"]["it"]["state"], "done", "a finished store is reported at once")
+            scanner.store_finished("fr", {"stats": {"cooldown_until": clock[0] + 3600}})
+            self.assertEqual(sent[3]["stores"]["fr"]["state"], "paused")
+            scanner.progress_end()
+            scanner.progress_item("it", "a", done=True)
+            clock[0] += 60
+            scanner.progress_send(force=True)
+            self.assertEqual(len(sent), 4, "nothing after the scan ended")
+
+    def test_scan_now_wakes_the_loop_once_per_request(self):
+        resp = Mock(ok=True)
+        resp.json.return_value = {"request": "2026-09-27 21:00:01 #aa11 p:a"}
+        scanner.WAKE.clear()
+        scanner._WOKEN["request"] = None
+        scanner.PENDING.update(request=None)
+        with patch.object(scanner.requests, "get", return_value=resp):
+            scanner.poll_scan_request()
+            self.assertTrue(scanner.WAKE.is_set())
+            scanner.WAKE.clear()
+            scanner.poll_scan_request()
+            self.assertFalse(scanner.WAKE.is_set(), "the same request doesn't wake it again")
+            resp.json.return_value = {"request": None}
+            scanner.poll_scan_request()
+            self.assertFalse(scanner.WAKE.is_set())
+            scanner.PENDING.update(request="2026-09-27 21:05:00 #bb22")
+            resp.json.return_value = {"request": "2026-09-27 21:05:00 #bb22"}
+            scanner.poll_scan_request()
+            self.assertFalse(scanner.WAKE.is_set(), "a request this scanner already served (not acknowledged yet) doesn't wake it")
 
     # ---- 2.1.3
     def test_product_scan_does_not_take_the_slot(self):
@@ -396,7 +449,7 @@ class ScannerTest(unittest.TestCase):
         resp = Mock(ok=True)
         resp.json.return_value = state
         scanner.PENDING.update(slot="2026-09-24 14", payload=None, tries=0, request=None)
-        with patch.object(scanner.requests, "get", return_value=resp),                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"),                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"cooldown_until": scanner.time.time() + 999}}) as scan,                 patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"),                 patch.object(scanner, "send_ingest", return_value=True):
+        with patch.object(scanner.requests, "get", return_value=resp),                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"),                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"cooldown_until": scanner.time.time() + 999}}) as scan,                 patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"),                 patch.object(scanner, "send_ingest", return_value=True):
             scanner.FOLLOWUP["stores"] = []
             self.assertEqual(scanner.main(), 0)
             self.assertEqual(scanner.PENDING["slot"], "2026-09-24 14", "a product scan doesn't mark the 20:00 slot as scanned")
@@ -416,7 +469,7 @@ class ScannerTest(unittest.TestCase):
         with patch.object(scanner.requests, "get", return_value=resp), \
                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": []}) as scan, \
-                patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"), \
+                patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), patch.object(scanner.time, "sleep"), \
                 patch.object(scanner, "send_ingest", return_value=False) as send:
             for _ in range(8):                        # the Worker keeps failing, the old request stays open
                 scanner.main()
@@ -473,7 +526,7 @@ class ScannerTest(unittest.TestCase):
         with patch.object(scanner.requests, "get", return_value=resp), \
                 patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"challenges": 0}}), \
-                patch.object(scanner, "progress"), patch.object(scanner, "send_partial") as partial, \
+                patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial") as partial, \
                 patch.object(scanner.time, "sleep") as sleep, patch.object(scanner, "send_ingest", return_value=True):
             scanner.main()
         self.assertEqual([c.args[1] for c in partial.call_args_list], ["it", "fr", "es"])
@@ -486,7 +539,7 @@ class ScannerTest(unittest.TestCase):
         resp.json.return_value = state
         scanner.PENDING.update(slot=None, payload=None, tries=0, request=None)
         sent = []
-        with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-24 20"),                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"challenges": 0, "cooldown_until": 0}}),                 patch.object(scanner, "progress"), patch.object(scanner, "send_partial"),                 patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
+        with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-24 20"),                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [], "stats": {"challenges": 0, "cooldown_until": 0}}),                 patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"),                 patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
             scanner.main()
         self.assertEqual(sent[0]["request"], "2026-09-24 19:50")
         self.assertRegex(sent[0]["started"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
@@ -549,7 +602,7 @@ class ScannerTest(unittest.TestCase):
         sent = []
         with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-26 08"), \
                 patch.object(scanner, "scan_store", return_value={"jar": "", "items": [{"product": "x", "asin": "B", "raw": {"title": "t", "price": "2"}}], "stats": {"challenges": 0, "cooldown_until": 0}}) as scan, \
-                patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), \
+                patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), \
                 patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
             scanner.main()
         self.assertEqual([c.args[1] for c in scan.call_args_list], ["it", "fr"])   # only the paused stores
@@ -663,7 +716,7 @@ class ScannerTest(unittest.TestCase):
         sent = []
         with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_PARALLEL", 3), \
                 patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
-                patch.object(scanner, "scan_store", side_effect=fake_scan), patch.object(scanner, "progress"), \
+                patch.object(scanner, "scan_store", side_effect=fake_scan), patch.object(scanner, "progress_send"), \
                 patch.object(scanner, "send_partial") as partial, patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
             scanner.main()
         self.assertEqual(sorted(c.args[1] for c in partial.call_args_list), ["es", "fr", "it"])
@@ -775,7 +828,7 @@ class ScannerTest(unittest.TestCase):
             state = {"stores": ["it"], "products": [], "cookies": {}}
             scanner.FOLLOWUP.update(slot="s", stores=["it"], after=0.0, kept={})
             with patch.object(scanner, "scan_store", return_value={"jar": "", "items": [{"product": "x", "asin": "A", "raw": {"title": "t", "price": "1"}}], "stats": {"challenges": 0, "cooldown_until": 0}}), \
-                    patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner, "send_ingest", return_value=True):
+                    patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), patch.object(scanner, "send_ingest", return_value=True):
                 scanner.run_followup(state, "s")
             self.assertEqual(scanner.load_pace(), {"delay": 30.0, "clean": 2, "rest": 0})    # unchanged: not a full clean scan
 

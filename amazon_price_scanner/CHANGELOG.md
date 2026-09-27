@@ -1,3 +1,10 @@
+# 2.1.4
+
+- Live scan progress for the dashboard: pages read / planned per store, the product being read, and each store's
+  state (waiting, scanning, waiting 90 s after a challenge, paused, done). Reported at most every 12 seconds.
+- "Scan now" (the whole scan or one product) starts within seconds: the job thread looks for a waiting request
+  every 15 seconds and wakes the scan loop.
+
 # 2.1.3
 
 - "Scan only this product" from the dashboard: a short scan of one product in every store. It doesn't count as the

@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.3"
+VERSION = "2.1.4"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -575,7 +575,9 @@ def scan_store(state, store, diagnostic=False):
             print(store, "challenge; waiting", int(CHALLENGE_RETRY), "s and reloading once", flush=True)
             _SOFT[store] = False
             _WAIT_SECONDS[store] += CHALLENGE_RETRY
+            progress_store(store, state="retry")
             time.sleep(CHALLENGE_RETRY)
+            progress_store(store, force=False, state="running")
             value = read()
         return value
 
@@ -605,6 +607,7 @@ def scan_store(state, store, diagnostic=False):
                         "status": "not matched" if asins is None else "not listed"}})
                 continue
             for asin in asins:
+                progress_item(store, p["key"])
                 if blocked or cooling or load_cooldowns().get(store, 0) > time.time():
                     raw = {"status": "blocked (store cooldown)"}
                 elif aborted:
@@ -658,6 +661,7 @@ def scan_store(state, store, diagnostic=False):
                     else:
                         errors_in_row = 0
                 items.append({"product": p["key"], "asin": asin, "raw": raw})
+                progress_item(store, p["key"], done=True)
                 print(store, asin, {k: raw.get(k) for k in
                       ("captcha", "to", "price", "price2", "delivery", "status")}, flush=True)
                 if diagnostic:
@@ -848,12 +852,85 @@ PENDING = {"slot": None, "payload": None, "tries": 0, "request": None}   # last 
 FOLLOWUP = {"slot": None, "stores": [], "after": 0.0, "kept": {}}          # stores paused in the last scan, to re-scan
 
 
-def progress(slot, store):
-    """Tell the Worker a precise scan is running (it then holds back its light fallback scan)."""
+# ------------------------------------------------------------------ live progress (the dashboard shows it)
+# Pages read / planned per store, the product being read and the store's state. Sent at most every PROGRESS_EVERY
+# seconds (each report is one write on the site), right away when a store starts waiting, finishes or pauses.
+# A report also tells the Worker a precise scan is running (it then holds back its light fallback scan).
+PROGRESS_EVERY = 12
+_PROG_LOCK = threading.Lock()
+PROG = {"slot": None, "only": None, "request": None, "started": 0, "parallel": 1, "stores": {}, "sent": 0.0}
+
+
+def plan_pages(state, store):
+    """How many product pages this scan reads in a store (the progress bar's total)."""
+    return sum(len(p["asinsByStore"].get(store) or []) for p in state["products"] if store not in p.get("skip", []))
+
+
+def progress_start(slot, state, stores, only=None, request=None):
+    with _PROG_LOCK:
+        PROG.update(slot=slot, only=only, request=request, started=int(time.time()), parallel=TURBO_PARALLEL if turbo_now() else 1,
+                    stores={s: {"total": plan_pages(state, s), "done": 0, "state": "waiting", "cur": ""} for s in stores})
+    progress_send(force=True)
+
+
+def progress_store(store, force=True, **fields):
+    with _PROG_LOCK:
+        if not PROG["slot"] or store not in PROG["stores"]:
+            return
+        PROG["stores"][store].update(fields)
+    progress_send(force=force)
+
+
+def progress_item(store, product, done=False):
+    with _PROG_LOCK:
+        x = PROG["stores"].get(store) if PROG["slot"] else None
+        if x is None:
+            return
+        if done:
+            x["done"] = min(x["total"], x["done"] + 1)
+        else:
+            x["cur"] = product
+    progress_send()
+
+
+def progress_end():
+    with _PROG_LOCK:
+        PROG.update(slot=None, stores={})
+
+
+def progress_send(force=False):
+    with _PROG_LOCK:
+        if not PROG["slot"] or (not force and time.time() - PROG["sent"] < PROGRESS_EVERY):
+            return
+        PROG["sent"] = time.time()
+        running = [s for s, x in PROG["stores"].items() if x["state"] == "running"]
+        body = {"slot": PROG["slot"], "store": running[0] if running else "", "v": 2, "started": PROG["started"],
+                "only": PROG["only"], "request": PROG["request"], "parallel": PROG["parallel"],
+                "stores": {s: dict(x) for s, x in PROG["stores"].items()}}
+    if DRY:
+        return
     try:
-        requests.post(WORKER + "/api/progress", headers=AUTH, json={"slot": slot, "store": store}, timeout=15)
+        requests.post(WORKER + "/api/progress", headers=AUTH, json=body, timeout=10)
     except Exception:
         pass
+
+
+def store_finished(store, result):
+    paused = result.get("stats", {}).get("cooldown_until", 0) > time.time()
+    progress_store(store, state="paused" if paused else "done", cur="")
+
+
+# a "scan now" pressed on the dashboard wakes the scan loop within seconds (the job thread looks every few polls)
+WAKE = threading.Event()
+_WOKEN = {"request": None}
+
+
+def poll_scan_request():
+    r = requests.get(WORKER + "/api/scan-pending", headers=AUTH, timeout=15)
+    req = r.json().get("request") if r.ok else None
+    if req and req != PENDING["request"] and req != _WOKEN["request"]:
+        _WOKEN["request"] = req
+        WAKE.set()
 
 
 _PARTIAL_LOCK = threading.Lock()
@@ -926,10 +1003,13 @@ def main():
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": started, "request": request, "stores": {}}
     _BACKOFF["on"] = False
     t0 = time.monotonic()
+    only = request.split(" p:", 1)[1].split(",") if product_scan else None
+    progress_start(slot, state, state["stores"], only, request)
 
     def one(store):
-        progress(slot, store)
+        progress_store(store, force=False, state="running")
         result = scan_store(state, store)
+        store_finished(store, result)
         print(store, "done:", len(result["items"]), "items", flush=True)
         if not DRY:
             send_partial(slot, store, result)
@@ -943,6 +1023,7 @@ def main():
         for store in state["stores"]:
             payload["stores"][store] = one(store)[1]
     payload["elapsed"] = round(time.monotonic() - t0, 1)
+    progress_end()
     challenges, clean = scan_was_clean(payload["stores"])
     pace = update_pace(challenges, clean)
     pace = turbo_after_scan(challenges, pages_read(payload["stores"]) > 0)
@@ -978,13 +1059,16 @@ def run_followup(state, slot):
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": datetime.now(IL).strftime("%Y-%m-%d %H:%M"),
                "request": None, "stores": {}}
     t0 = time.monotonic()
+    progress_start(slot, state, stores)
     for store in stores:
-        progress(slot, store)
+        progress_store(store, force=False, state="running")
         payload["stores"][store] = scan_store(state, store)
+        store_finished(store, payload["stores"][store])
         print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
         if not DRY:
             send_partial(slot, store, payload["stores"][store])
     payload["elapsed"] = round(time.monotonic() - t0, 1)
+    progress_end()
     challenges, _clean = scan_was_clean({s: payload["stores"][s] for s in stores})
     pace = update_pace(challenges, False)                # a partial scan never counts as a clean full scan
     print("pace: next gap between pages", pace["delay"], "s", flush=True)
@@ -999,17 +1083,24 @@ def run_followup(state, slot):
 
 def job_loop():
     """Product checks from the dashboard - on their own thread, so they also run while a scan is in progress."""
+    n = 0
     while True:
         try:
             poll_jobs()
         except Exception as e:
             print("job error:", type(e).__name__, flush=True)
+        n += 1
+        if n % 3 == 0:
+            try:
+                poll_scan_request()
+            except Exception:
+                pass
         time.sleep(JOB_POLL)
 
 
 if __name__ == "__main__":
     if "--loop" in sys.argv:
-        print(f"amazon price scanner {VERSION} started (transport={TRANSPORT}; scans checked every 2 minutes, "
+        print(f"amazon price scanner {VERSION} started (transport={TRANSPORT}; scans checked every 2 minutes or at once on request, "
               f"product checks every {JOB_POLL}s, {CHECK_CONCURRENCY} stores in parallel)", flush=True)
         threading.Thread(target=job_loop, name="jobs", daemon=True).start()
         while True:
@@ -1017,5 +1108,6 @@ if __name__ == "__main__":
                 main()
             except Exception as e:  # keep the add-on alive on network errors
                 print("error:", type(e).__name__, flush=True)
-            time.sleep(120)
+            WAKE.wait(120)                  # every 2 minutes, or right away when "scan now" was pressed
+            WAKE.clear()
     sys.exit(main())
