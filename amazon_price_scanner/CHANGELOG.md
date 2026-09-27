@@ -1,3 +1,11 @@
+# 2.1.1
+
+- Turbo fallback is complete: a page that was waiting in a store's queue when a challenge came goes to the safe
+  queue instead, and the first page on the safe queue waits the full safe gap.
+- Pace state is saved under a lock with a private temporary file (parallel stores could collide and break the
+  challenge handling).
+- Partial results are sent to the site one at a time (two at once could overwrite each other there).
+
 # 2.1.0
 
 - Turbo mode (option `turbo`): several stores are scanned at the same time (`turbo_parallel_stores`, default 3),

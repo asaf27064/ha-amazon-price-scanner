@@ -547,6 +547,56 @@ class ScannerTest(unittest.TestCase):
         self.assertGreater(scanner.FOLLOWUP["after"], scanner.time.time() + 3000)
         scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
 
+    # ---- 2.1.1
+    def test_a_page_waiting_in_turbo_goes_safe_after_a_challenge(self):
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_DELAY", 0.0), patch.object(scanner, "REQUEST_DELAY", 30.0), \
+                patch.object(scanner, "MIN_REQUEST_DELAY", 20.0), patch.object(scanner.time, "sleep") as sleep:
+            scanner._BACKOFF["on"] = False
+            scanner.save_pace({"delay": 20.0, "clean": 0, "rest": 0})
+            scanner._TURBO_NEXT.update({s: 0.0 for s in scanner._TURBO_NEXT})
+            opened = []
+            calls = [0]
+            def challenge_then_wait(*a):          # while Italy's next page waits its turn, France is challenged
+                calls[0] += 1
+                if calls[0] == 1:
+                    scanner.amazon_page("fr", lambda: ({"captcha": True}, ""))
+            scanner._TURBO_NEXT["it"] = scanner.time.monotonic() + 5
+            sleep.side_effect = challenge_then_wait
+            scanner.amazon_page("it", lambda: opened.append("it") or ({"title": "t", "price": "1"}, ""))
+            self.assertEqual(opened, ["it"])
+            self.assertFalse(scanner.turbo_now())
+            waits = [c.args[0] for c in sleep.call_args_list]
+            self.assertTrue(any(w > 25 for w in waits), waits)   # Italy's page waited the safe gap on the safe queue
+        scanner._BACKOFF["on"] = False
+        scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0})
+
+    def test_pace_saves_from_many_threads_do_not_collide(self):
+        import threading
+        errors = []
+        def work():
+            try:
+                for _ in range(20):
+                    scanner.slow_down_now(); scanner.update_pace(0, True); scanner.turbo_after_scan(0)
+            except Exception as e:
+                errors.append(e)
+        threads = [threading.Thread(target=work) for _ in range(6)]
+        [x.start() for x in threads]; [x.join() for x in threads]
+        self.assertEqual(errors, [])
+        self.assertIn("delay", scanner.load_pace())
+        scanner._BACKOFF["on"] = False
+
+    def test_partials_are_sent_one_at_a_time(self):
+        import threading
+        inside, most = [0], [0]
+        def post(*a, **k):
+            inside[0] += 1; most[0] = max(most[0], inside[0])
+            scanner.time.sleep.__wrapped__(0.05) if hasattr(scanner.time.sleep, "__wrapped__") else __import__("time").sleep(0.05)
+            inside[0] -= 1
+        with patch.object(scanner.requests, "post", side_effect=post):
+            threads = [threading.Thread(target=scanner.send_partial, args=("s", st, {"items": []})) for st in ("it", "fr", "es")]
+            [x.start() for x in threads]; [x.join() for x in threads]
+        self.assertEqual(most[0], 1)
+
     # ---- 2.1.0
     def test_turbo_scans_stores_at_the_same_time(self):
         import threading

@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -350,6 +350,9 @@ def save_cooldowns(cooldowns):
         temp.replace(DATA_DIR / "cooldowns.json")
 
 
+_PACE_LOCK = threading.RLock()
+
+
 def load_pace():
     try:
         pace = json.loads((DATA_DIR / "pace.json").read_text())
@@ -361,10 +364,11 @@ def load_pace():
 
 
 def save_pace(pace):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    temp = DATA_DIR / "pace.tmp"
-    temp.write_text(json.dumps(pace))
-    temp.replace(DATA_DIR / "pace.json")
+    with _PACE_LOCK:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        temp = DATA_DIR / f"pace.{threading.get_ident()}.tmp"
+        temp.write_text(json.dumps(pace))
+        temp.replace(DATA_DIR / "pace.json")
 
 
 def current_delay():
@@ -372,11 +376,18 @@ def current_delay():
 
 
 def slow_down_now():
-    """A challenge: back to the configured (slow) pace right away, for every following page - and out of turbo."""
+    """A challenge: back to the configured (slow) pace right away, for every following page - and out of turbo.
+    The next page on the (single) safe queue waits the full safe gap, even if turbo pages were running until now."""
+    global _NEXT_PAGE_AT
     _BACKOFF["on"] = True
-    pace = load_pace()
-    pace.update(delay=REQUEST_DELAY, clean=0)
-    save_pace(pace)
+    _NEXT_PAGE_AT = max(_NEXT_PAGE_AT, time.monotonic() + REQUEST_DELAY)
+    try:
+        with _PACE_LOCK:
+            pace = load_pace()
+            pace.update(delay=REQUEST_DELAY, clean=0)
+            save_pace(pace)
+    except OSError as e:                 # never let a file problem stop the challenge handling (pause, cooldown)
+        print("pace: could not save:", type(e).__name__, flush=True)
 
 
 def turbo_now():
@@ -390,12 +401,13 @@ def effective_delay():
 
 def turbo_after_scan(challenges):
     """A challenge in a scan: turbo rests for TURBO_REST scans; each scan without one brings it closer again."""
-    pace = load_pace()
-    if challenges and TURBO:
-        pace["rest"] = TURBO_REST
-    elif pace["rest"] > 0:
-        pace["rest"] -= 1
-    save_pace(pace)
+    with _PACE_LOCK:
+        pace = load_pace()
+        if challenges and TURBO:
+            pace["rest"] = TURBO_REST
+        elif pace["rest"] > 0:
+            pace["rest"] -= 1
+        save_pace(pace)
     return pace
 
 
@@ -403,14 +415,15 @@ def update_pace(challenges, clean):
     """After a full scan. Any challenge: slow pace. A clean scan (no challenge, no errors / skipped stores, pages
     actually read) counts towards speeding up - several in a row shorten the gap a little (never below
     MIN_REQUEST_DELAY). A scan with errors neither speeds up nor resets: it proves nothing about the pace."""
-    pace = load_pace()
-    if challenges:
-        pace.update(delay=REQUEST_DELAY, clean=0)
-    elif clean:
-        pace["clean"] += 1
-        if pace["clean"] >= CLEAN_SCANS_TO_SPEED_UP and pace["delay"] > MIN_REQUEST_DELAY:
-            pace.update(delay=max(MIN_REQUEST_DELAY, pace["delay"] - PACE_STEP), clean=0)
-    save_pace(pace)
+    with _PACE_LOCK:
+        pace = load_pace()
+        if challenges:
+            pace.update(delay=REQUEST_DELAY, clean=0)
+        elif clean:
+            pace["clean"] += 1
+            if pace["clean"] >= CLEAN_SCANS_TO_SPEED_UP and pace["delay"] > MIN_REQUEST_DELAY:
+                pace.update(delay=max(MIN_REQUEST_DELAY, pace["delay"] - PACE_STEP), clean=0)
+        save_pace(pace)
     return pace
 
 
@@ -459,8 +472,12 @@ def _load_page(store, get, pace_now):
         _LOAD_SECONDS[store] += time.monotonic() - started
 
 
+_HANDOVER = object()   # "turbo ended while this page waited - take the safe queue"
+
+
 def _turbo_page(store, get):
-    """Turbo: this store's own queue and gap; a few stores load at the same time."""
+    """Turbo: this store's own queue and gap; a few stores load at the same time. Turbo is checked again right
+    before the page is opened (after every wait), so nothing leaves at turbo pace once a challenge was recorded."""
     with _TURBO_LOCKS[store]:
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
@@ -470,11 +487,15 @@ def _turbo_page(store, get):
             _WAIT_SECONDS[store] += wait
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
-        try:
-            with _INFLIGHT:
+        if not turbo_now():
+            return _HANDOVER
+        with _INFLIGHT:
+            if not turbo_now():             # a challenge while this page waited for a free slot
+                return _HANDOVER
+            try:
                 return _load_page(store, get, TURBO_DELAY)
-        finally:
-            _TURBO_NEXT[store] = time.monotonic() + TURBO_DELAY + random.uniform(0, 1)
+            finally:
+                _TURBO_NEXT[store] = time.monotonic() + TURBO_DELAY + random.uniform(0, 1)
 
 
 def amazon_page(store, get):
@@ -485,7 +506,9 @@ def amazon_page(store, get):
     """
     global _NEXT_PAGE_AT
     if turbo_now():
-        return _turbo_page(store, get)
+        value = _turbo_page(store, get)
+        if value is not _HANDOVER:
+            return value
     with _PAGE_LOCK:
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
@@ -821,14 +844,18 @@ def progress(slot, store):
         pass
 
 
+_PARTIAL_LOCK = threading.Lock()
+
+
 def send_partial(slot, store, data):
     """One store's results right away, so the dashboard shows them during a long scan (display only - the full
     result at the end still does history and alerts). Failures don't matter."""
-    try:
-        requests.post(WORKER + "/api/ingest-partial", headers=AUTH,
-                      json={"slot": slot, "store": store, "items": data["items"]}, timeout=30)
-    except Exception:
-        pass
+    with _PARTIAL_LOCK:                  # parallel stores: one at a time, or the site could lose one of them
+        try:
+            requests.post(WORKER + "/api/ingest-partial", headers=AUTH,
+                          json={"slot": slot, "store": store, "items": data["items"]}, timeout=30)
+        except Exception:
+            pass
 
 
 def send_ingest(payload):
