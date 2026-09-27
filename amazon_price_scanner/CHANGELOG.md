@@ -1,3 +1,10 @@
+# 2.1.2
+
+- The safe queue waits until its next moment stops moving: a second challenge while a page is waiting pushes that
+  page later too.
+- A challenge in a product check also makes turbo rest; the rest counts down only on scans that really read pages.
+- The scan result carries its real elapsed time (with stores in parallel, summed load + wait is work, not duration).
+
 # 2.1.1
 
 - Turbo fallback is complete: a page that was waiting in a store's queue when a challenge came goes to the safe

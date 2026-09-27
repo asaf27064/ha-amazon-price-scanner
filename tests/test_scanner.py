@@ -586,16 +586,50 @@ class ScannerTest(unittest.TestCase):
         scanner._BACKOFF["on"] = False
 
     def test_partials_are_sent_one_at_a_time(self):
-        import threading
-        inside, most = [0], [0]
-        def post(*a, **k):
-            inside[0] += 1; most[0] = max(most[0], inside[0])
-            scanner.time.sleep.__wrapped__(0.05) if hasattr(scanner.time.sleep, "__wrapped__") else __import__("time").sleep(0.05)
-            inside[0] -= 1
-        with patch.object(scanner.requests, "post", side_effect=post):
-            threads = [threading.Thread(target=scanner.send_partial, args=("s", st, {"items": []})) for st in ("it", "fr", "es")]
-            [x.start() for x in threads]; [x.join() for x in threads]
-        self.assertEqual(most[0], 1)
+        import contextlib, threading
+        def run(lock):
+            inside, most, guard = [0], [0], threading.Lock()
+            gate = threading.Event()
+            def post(*a, **k):
+                with guard:
+                    inside[0] += 1; most[0] = max(most[0], inside[0])
+                gate.wait(0.2)                       # a real, bounded overlap window (Event.wait is not patched)
+                with guard:
+                    inside[0] -= 1
+            with patch.object(scanner.requests, "post", side_effect=post), patch.object(scanner, "_PARTIAL_LOCK", lock):
+                threads = [threading.Thread(target=scanner.send_partial, args=("s", st, {"items": []})) for st in ("it", "fr", "es")]
+                [x.start() for x in threads]; [x.join() for x in threads]
+            return most[0]
+        self.assertEqual(run(threading.Lock()), 1)                # with the lock: never two at once
+        self.assertGreater(run(contextlib.nullcontext()), 1)      # the probe really detects overlap without it
+
+    def test_a_second_challenge_pushes_a_page_that_is_already_waiting(self):
+        with patch.object(scanner, "TURBO", False), patch.object(scanner.time, "sleep") as sleep:
+            now = scanner.time.monotonic()
+            scanner._NEXT_PAGE_AT = now + 30
+            pushed = [False]
+            def second_challenge(sec):
+                if not pushed[0]:
+                    pushed[0] = True
+                    scanner._NEXT_PAGE_AT = now + 40        # another store's challenge while we wait
+            sleep.side_effect = second_challenge
+            scanner.amazon_page("it", lambda: ({"title": "t", "price": "1"}, ""))
+            waits = [c.args[0] for c in sleep.call_args_list]
+            self.assertEqual(len(waits), 2, waits)
+            self.assertGreater(waits[1], 35)                # waited again, towards the later deadline
+        scanner._NEXT_PAGE_AT = 0.0
+
+    def test_turbo_rests_after_a_check_challenge_and_counts_only_scans_that_read(self):
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
+            scanner.save_pace({"delay": 20.0, "clean": 0, "rest": 0})
+            scanner._BACKOFF["on"] = False
+            scanner.slow_down_now()                          # e.g. a challenge during a product check
+            scanner._BACKOFF["on"] = False                   # the next scan resets the in-scan flag ...
+            self.assertFalse(scanner.turbo_now())            # ... but turbo still rests
+            self.assertEqual(scanner.turbo_after_scan(0, read_pages=False)["rest"], 3)   # a scan that read nothing
+            self.assertEqual(scanner.turbo_after_scan(0, read_pages=True)["rest"], 2)
+        scanner._BACKOFF["on"] = False
+        scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0})
 
     # ---- 2.1.0
     def test_turbo_scans_stores_at_the_same_time(self):

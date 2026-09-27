@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -385,6 +385,8 @@ def slow_down_now():
         with _PACE_LOCK:
             pace = load_pace()
             pace.update(delay=REQUEST_DELAY, clean=0)
+            if TURBO:
+                pace["rest"] = TURBO_REST        # also after a challenge in a product check (not only in a scan)
             save_pace(pace)
     except OSError as e:                 # never let a file problem stop the challenge handling (pause, cooldown)
         print("pace: could not save:", type(e).__name__, flush=True)
@@ -399,16 +401,21 @@ def effective_delay():
     return TURBO_DELAY if turbo_now() else current_delay()
 
 
-def turbo_after_scan(challenges):
-    """A challenge in a scan: turbo rests for TURBO_REST scans; each scan without one brings it closer again."""
+def turbo_after_scan(challenges, read_pages=True):
+    """A challenge: turbo rests for TURBO_REST scans. The rest counts down only on a scan without a challenge that
+    really read pages (a scan that failed for other reasons says nothing about Amazon's patience)."""
     with _PACE_LOCK:
         pace = load_pace()
         if challenges and TURBO:
             pace["rest"] = TURBO_REST
-        elif pace["rest"] > 0:
+        elif pace["rest"] > 0 and read_pages:
             pace["rest"] -= 1
         save_pace(pace)
     return pace
+
+
+def pages_read(stores):
+    return sum(1 for d in stores.values() for i in d.get("items", []) if not i["raw"].get("status") and i["raw"].get("title"))
 
 
 def update_pace(challenges, clean):
@@ -512,10 +519,15 @@ def amazon_page(store, get):
     with _PAGE_LOCK:
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
-        wait = _NEXT_PAGE_AT - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-            _WAIT_SECONDS[store] += wait
+        deadline = _NEXT_PAGE_AT
+        while True:
+            wait = deadline - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+                _WAIT_SECONDS[store] += wait
+            if _NEXT_PAGE_AT <= deadline:
+                break
+            deadline = _NEXT_PAGE_AT         # a challenge meanwhile pushed the next safe moment later
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
         try:
@@ -910,6 +922,7 @@ def main():
     # "started" and "request": the site keeps a "scan now" pressed while this scan was already running
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": started, "request": request, "stores": {}}
     _BACKOFF["on"] = False
+    t0 = time.monotonic()
 
     def one(store):
         progress(slot, store)
@@ -926,9 +939,10 @@ def main():
     else:
         for store in state["stores"]:
             payload["stores"][store] = one(store)[1]
+    payload["elapsed"] = round(time.monotonic() - t0, 1)
     challenges, clean = scan_was_clean(payload["stores"])
     pace = update_pace(challenges, clean)
-    pace = turbo_after_scan(challenges)
+    pace = turbo_after_scan(challenges, pages_read(payload["stores"]) > 0)
     print("pace: next gap between pages", pace["delay"], "s", ("(turbo rests for %d scans)" % pace["rest"]) if TURBO and pace["rest"] else "", flush=True)
     if DRY:
         print("dry run - not sending")
@@ -959,12 +973,14 @@ def run_followup(state, slot):
     print(datetime.now(IL).strftime("%Y-%m-%d %H:%M"), "scanning the paused stores again:", stores, flush=True)
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": datetime.now(IL).strftime("%Y-%m-%d %H:%M"),
                "request": None, "stores": {}}
+    t0 = time.monotonic()
     for store in stores:
         progress(slot, store)
         payload["stores"][store] = scan_store(state, store)
         print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
         if not DRY:
             send_partial(slot, store, payload["stores"][store])
+    payload["elapsed"] = round(time.monotonic() - t0, 1)
     challenges, _clean = scan_was_clean({s: payload["stores"][s] for s in stores})
     pace = update_pace(challenges, False)                # a partial scan never counts as a clean full scan
     print("pace: next gap between pages", pace["delay"], "s", flush=True)
