@@ -547,6 +547,58 @@ class ScannerTest(unittest.TestCase):
         self.assertGreater(scanner.FOLLOWUP["after"], scanner.time.time() + 3000)
         scanner.FOLLOWUP.update(slot=None, stores=[], after=0.0, kept={})
 
+    # ---- 2.1.0
+    def test_turbo_scans_stores_at_the_same_time(self):
+        import threading
+        state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it", "fr", "es"], "products": [], "cookies": {},
+                 "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-24 14", "scanRequest": None}
+        resp = Mock(ok=True)
+        resp.json.return_value = state
+        scanner.PENDING.update(slot=None, payload=None, tries=0, request=None)
+        together = threading.Barrier(3, timeout=5)       # only passes if the three stores run at once
+        def fake_scan(st, store):
+            together.wait()
+            return {"jar": "", "items": [{"product": "x", "asin": store, "raw": {"title": "t", "price": "1"}}], "stats": {"challenges": 0, "cooldown_until": 0}}
+        sent = []
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_PARALLEL", 3), \
+                patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "due_slot", return_value="2026-09-24 20"), \
+                patch.object(scanner, "scan_store", side_effect=fake_scan), patch.object(scanner, "progress"), \
+                patch.object(scanner, "send_partial") as partial, patch.object(scanner, "send_ingest", side_effect=lambda p: sent.append(p) or True):
+            scanner.main()
+        self.assertEqual(sorted(c.args[1] for c in partial.call_args_list), ["es", "fr", "it"])
+        self.assertEqual(list(sent[0]["stores"]), ["it", "fr", "es"])                # payload keeps the store order
+
+    def test_turbo_paces_each_store_on_its_own(self):
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_DELAY", 5.0), patch.object(scanner.time, "sleep") as sleep:
+            scanner._BACKOFF["on"] = False
+            scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0})
+            scanner._TURBO_NEXT.update({s: 0.0 for s in scanner._TURBO_NEXT})
+            ok = lambda: ({"title": "t", "price": "1"}, "")
+            scanner.amazon_page("it", ok)
+            scanner.amazon_page("fr", ok)                    # another store: doesn't wait for Italy's gap
+            self.assertEqual(sleep.call_count, 0)
+            scanner.amazon_page("it", ok)                    # the same store: waits its own gap
+            self.assertEqual(sleep.call_count, 1)
+            self.assertGreater(sleep.call_args.args[0], 3.0)
+
+    def test_a_challenge_in_turbo_falls_back_and_turbo_rests(self):
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_DELAY", 0.0), \
+                patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
+            scanner._BACKOFF["on"] = False
+            scanner.save_pace({"delay": 20.0, "clean": 0, "rest": 0})
+            self.assertTrue(scanner.turbo_now())
+            scanner.amazon_page("de", lambda: ({"captcha": True}, ""))
+            self.assertFalse(scanner.turbo_now())                         # the rest of this scan: the safe path
+            self.assertEqual(scanner.current_delay(), 30.0)                # at the safe pace
+            self.assertEqual(scanner._CHALLENGE_DELAYS["de"][-1], 0.0)     # the challenge came at the turbo pace
+            self.assertEqual(scanner.turbo_after_scan(1)["rest"], 3)       # turbo rests for three scans
+            scanner._BACKOFF["on"] = False                                 # next scan
+            for left in (2, 1, 0):
+                self.assertFalse(scanner.turbo_now())
+                self.assertEqual(scanner.turbo_after_scan(0)["rest"], left)
+            self.assertTrue(scanner.turbo_now())                           # and tries again
+        scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0})
+
     # ---- 2.0.12
     def test_missing_pages_do_not_abort_the_store(self):
         missing = ({"status": "error: product page missing"}, "session-id=original")
@@ -624,7 +676,7 @@ class ScannerTest(unittest.TestCase):
             with patch.object(scanner, "scan_store", return_value={"jar": "", "items": [{"product": "x", "asin": "A", "raw": {"title": "t", "price": "1"}}], "stats": {"challenges": 0, "cooldown_until": 0}}), \
                     patch.object(scanner, "progress"), patch.object(scanner, "send_partial"), patch.object(scanner, "send_ingest", return_value=True):
                 scanner.run_followup(state, "s")
-            self.assertEqual(scanner.load_pace(), {"delay": 30.0, "clean": 2})    # unchanged: not a full clean scan
+            self.assertEqual(scanner.load_pace(), {"delay": 30.0, "clean": 2, "rest": 0})    # unchanged: not a full clean scan
 
 
 if __name__ == "__main__":

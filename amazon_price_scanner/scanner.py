@@ -40,8 +40,14 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.0.12"
+VERSION = "2.1.0"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
+# Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
+# of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
+TURBO = os.environ.get("TURBO", "false").lower() == "true"
+TURBO_PARALLEL = min(3, max(1, int(os.environ.get("TURBO_PARALLEL_STORES", "3"))))
+TURBO_DELAY = min(30.0, max(0.0, float(os.environ.get("TURBO_DELAY", "0"))))
+TURBO_REST = 3
 JOB_POLL = 5
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
 
@@ -304,6 +310,10 @@ _COOLDOWN_LOCK = threading.RLock()
 _STORE_LOCKS = {store: threading.RLock() for store in DOMAIN}
 _PAGE_LOCK = threading.Lock()
 _NEXT_PAGE_AT = 0.0
+_TURBO_LOCKS = {store: threading.Lock() for store in DOMAIN}   # turbo: each store keeps its own queue and pace
+_TURBO_NEXT = {store: 0.0 for store in DOMAIN}
+_INFLIGHT = threading.BoundedSemaphore(TURBO_PARALLEL)        # turbo: at most this many pages loading at once
+_BACKOFF = {"on": False}                                      # a challenge in this scan: back to the safe path
 _PAGE_COUNTS = {store: 0 for store in DOMAIN}
 _LOAD_SECONDS = {store: 0.0 for store in DOMAIN}
 _WAIT_SECONDS = {store: 0.0 for store in DOMAIN}
@@ -346,7 +356,8 @@ def load_pace():
     except (FileNotFoundError, ValueError):
         pace = {}
     delay = float(pace.get("delay", REQUEST_DELAY))
-    return {"delay": min(REQUEST_DELAY, max(MIN_REQUEST_DELAY, delay)), "clean": int(pace.get("clean", 0))}
+    return {"delay": min(REQUEST_DELAY, max(MIN_REQUEST_DELAY, delay)), "clean": int(pace.get("clean", 0)),
+            "rest": int(pace.get("rest", 0))}
 
 
 def save_pace(pace):
@@ -361,8 +372,31 @@ def current_delay():
 
 
 def slow_down_now():
-    """A challenge: back to the configured (slow) pace right away, for every following page."""
-    save_pace({"delay": REQUEST_DELAY, "clean": 0})
+    """A challenge: back to the configured (slow) pace right away, for every following page - and out of turbo."""
+    _BACKOFF["on"] = True
+    pace = load_pace()
+    pace.update(delay=REQUEST_DELAY, clean=0)
+    save_pace(pace)
+
+
+def turbo_now():
+    """Turbo is on, not resting after a recent challenge, and this scan hasn't met a challenge yet."""
+    return TURBO and not _BACKOFF["on"] and load_pace()["rest"] == 0
+
+
+def effective_delay():
+    return TURBO_DELAY if turbo_now() else current_delay()
+
+
+def turbo_after_scan(challenges):
+    """A challenge in a scan: turbo rests for TURBO_REST scans; each scan without one brings it closer again."""
+    pace = load_pace()
+    if challenges and TURBO:
+        pace["rest"] = TURBO_REST
+    elif pace["rest"] > 0:
+        pace["rest"] -= 1
+    save_pace(pace)
+    return pace
 
 
 def update_pace(challenges, clean):
@@ -371,11 +405,11 @@ def update_pace(challenges, clean):
     MIN_REQUEST_DELAY). A scan with errors neither speeds up nor resets: it proves nothing about the pace."""
     pace = load_pace()
     if challenges:
-        pace = {"delay": REQUEST_DELAY, "clean": 0}
+        pace.update(delay=REQUEST_DELAY, clean=0)
     elif clean:
         pace["clean"] += 1
         if pace["clean"] >= CLEAN_SCANS_TO_SPEED_UP and pace["delay"] > MIN_REQUEST_DELAY:
-            pace = {"delay": max(MIN_REQUEST_DELAY, pace["delay"] - PACE_STEP), "clean": 0}
+            pace.update(delay=max(MIN_REQUEST_DELAY, pace["delay"] - PACE_STEP), clean=0)
     save_pace(pace)
     return pace
 
@@ -398,13 +432,60 @@ def serialized_store(fn):
     return run
 
 
+def _load_page(store, get, pace_now):
+    """Open one page and record what it was; a challenge slows everything down and (after one reload) pauses."""
+    started = time.monotonic()
+    try:
+        _PAGE_COUNTS[store] += 1
+        value = get()
+        raw = value[0] if isinstance(value, tuple) else value
+        if isinstance(raw, str):
+            raw = parse(raw)
+        if isinstance(raw, dict) and is_blocked(raw):
+            _CHALLENGE_COUNTS[store] += 1
+            _CHALLENGE_DELAYS[store].append(pace_now)
+            slow_down_now()
+            if CHALLENGE_RETRY and _RETRY_LEFT.get(store):
+                _RETRY_LEFT[store] = False      # the caller reloads this page once; a second challenge pauses
+                _SOFT[store] = True
+            else:
+                set_cooldown(store)
+        return value
+    except Blocked:
+        set_cooldown(store)
+        slow_down_now()
+        raise
+    finally:
+        _LOAD_SECONDS[store] += time.monotonic() - started
+
+
+def _turbo_page(store, get):
+    """Turbo: this store's own queue and gap; a few stores load at the same time."""
+    with _TURBO_LOCKS[store]:
+        if load_cooldowns().get(store, 0) > time.time():
+            raise Blocked()
+        wait = _TURBO_NEXT[store] - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+            _WAIT_SECONDS[store] += wait
+        if load_cooldowns().get(store, 0) > time.time():
+            raise Blocked()
+        try:
+            with _INFLIGHT:
+                return _load_page(store, get, TURBO_DELAY)
+        finally:
+            _TURBO_NEXT[store] = time.monotonic() + TURBO_DELAY + random.uniform(0, 1)
+
+
 def amazon_page(store, get):
-    """One shared queue for ALL product, seller and search page requests.
+    """One shared queue for ALL product, seller and search page requests (in turbo: one queue per store).
 
     Re-check cooldown after waiting: another thread may have just seen a challenge.
     Record a challenge before releasing the queue, so waiting requests see it.
     """
     global _NEXT_PAGE_AT
+    if turbo_now():
+        return _turbo_page(store, get)
     with _PAGE_LOCK:
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
@@ -414,30 +495,10 @@ def amazon_page(store, get):
             _WAIT_SECONDS[store] += wait
         if load_cooldowns().get(store, 0) > time.time():
             raise Blocked()
-        started = time.monotonic()
-        pace_now = current_delay()  # the gap this page followed (only a challenge changes it within a scan)
         try:
-            _PAGE_COUNTS[store] += 1
-            value = get()
-            raw = value[0] if isinstance(value, tuple) else value
-            if isinstance(raw, str):
-                raw = parse(raw)
-            if isinstance(raw, dict) and is_blocked(raw):
-                _CHALLENGE_COUNTS[store] += 1
-                _CHALLENGE_DELAYS[store].append(pace_now)
-                slow_down_now()
-                if CHALLENGE_RETRY and _RETRY_LEFT.get(store):
-                    _RETRY_LEFT[store] = False      # the caller reloads this page once; a second challenge pauses
-                    _SOFT[store] = True
-                else:
-                    set_cooldown(store)
-            return value
-        except Blocked:
-            set_cooldown(store)
-            slow_down_now()
-            raise
+            # the gap this page followed (only a challenge changes it within a scan)
+            return _load_page(store, get, current_delay())
         finally:
-            _LOAD_SECONDS[store] += time.monotonic() - started
             _NEXT_PAGE_AT = time.monotonic() + current_delay() + random.uniform(0, 3)
 
 
@@ -467,7 +528,8 @@ def scan_store(state, store, diagnostic=False):
     session = requests.Session()
     initial_pages, initial_challenges = _PAGE_COUNTS[store], _CHALLENGE_COUNTS[store]
     initial_load, initial_wait = _LOAD_SECONDS[store], _WAIT_SECONDS[store]
-    initial_challenge_delays, delay_start = len(_CHALLENGE_DELAYS[store]), current_delay()
+    initial_challenge_delays, delay_start = len(_CHALLENGE_DELAYS[store]), effective_delay()
+    parallel = TURBO_PARALLEL if turbo_now() else 1
     _RETRY_LEFT[store], _SOFT[store] = True, False
 
     def once_with_retry(read):
@@ -492,7 +554,8 @@ def scan_store(state, store, diagnostic=False):
                  "wait_seconds": round(_WAIT_SECONDS[store] - initial_wait, 1),
                  "delay_start": delay_start,
                  "challenge_delays": _CHALLENGE_DELAYS[store][initial_challenge_delays:],
-                 "delay": current_delay()}
+                 "parallel": parallel,
+                 "delay": effective_delay()}
         print(store, "summary:", stats, flush=True)
         return {"jar": jar, "items": items, "stats": stats}
 
@@ -819,14 +882,27 @@ def main():
     print(started, "scanning slot", slot, "(requested)" if requested else "(force)" if FORCE else "", flush=True)
     # "started" and "request": the site keeps a "scan now" pressed while this scan was already running
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": started, "request": request, "stores": {}}
-    for store in state["stores"]:
+    _BACKOFF["on"] = False
+
+    def one(store):
         progress(slot, store)
-        payload["stores"][store] = scan_store(state, store)
-        print(store, "done:", len(payload["stores"][store]["items"]), "items", flush=True)
+        result = scan_store(state, store)
+        print(store, "done:", len(result["items"]), "items", flush=True)
         if not DRY:
-            send_partial(slot, store, payload["stores"][store])
-    pace = update_pace(*scan_was_clean(payload["stores"]))
-    print("pace: next gap between pages", pace["delay"], "s", flush=True)
+            send_partial(slot, store, result)
+        return store, result
+    if turbo_now():
+        print("turbo:", TURBO_PARALLEL, "stores at a time, gap", TURBO_DELAY, "s per store", flush=True)
+        with ThreadPoolExecutor(max_workers=TURBO_PARALLEL) as pool:
+            done = dict(pool.map(one, state["stores"]))
+        payload["stores"] = {s: done[s] for s in state["stores"]}
+    else:
+        for store in state["stores"]:
+            payload["stores"][store] = one(store)[1]
+    challenges, clean = scan_was_clean(payload["stores"])
+    pace = update_pace(challenges, clean)
+    pace = turbo_after_scan(challenges)
+    print("pace: next gap between pages", pace["delay"], "s", ("(turbo rests for %d scans)" % pace["rest"]) if TURBO and pace["rest"] else "", flush=True)
     if DRY:
         print("dry run - not sending")
         return 0

@@ -22,6 +22,18 @@ export CHALLENGE_RETRY_SECONDS=90
 if bashio::config.has_value 'challenge_retry_seconds'; then
     export CHALLENGE_RETRY_SECONDS="$(bashio::config 'challenge_retry_seconds')"
 fi
+export TURBO=false
+if bashio::config.has_value 'turbo'; then
+    export TURBO="$(bashio::config 'turbo')"
+fi
+export TURBO_PARALLEL_STORES=3
+if bashio::config.has_value 'turbo_parallel_stores'; then
+    export TURBO_PARALLEL_STORES="$(bashio::config 'turbo_parallel_stores')"
+fi
+export TURBO_DELAY=0
+if bashio::config.has_value 'turbo_delay'; then
+    export TURBO_DELAY="$(bashio::config 'turbo_delay')"
+fi
 export DATA_DIR=/data/scanner
 export HOME=/data/scanner/home
 mkdir -p "$DATA_DIR" "$HOME"

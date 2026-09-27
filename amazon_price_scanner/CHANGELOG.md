@@ -1,3 +1,11 @@
+# 2.1.0
+
+- Turbo mode (option `turbo`): several stores are scanned at the same time (`turbo_parallel_stores`, default 3),
+  each with its own browser and its own gap (`turbo_delay`, default 0 s).
+- Smart fallback: the first challenge puts the rest of that scan back on the safe path (one page at a time,
+  `request_delay` apart); the challenged store gets its reload / pause / return as before. Turbo then rests for
+  3 scans and tries again by itself.
+
 # 2.0.12
 
 - A product page that doesn't exist in a store (a variant Amazon doesn't sell there) no longer counts towards
