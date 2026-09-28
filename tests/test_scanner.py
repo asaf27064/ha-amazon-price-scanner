@@ -389,6 +389,15 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
 
+    # ---- 2.1.5
+    def test_prime_join_line_is_read(self):
+        html = GOOD + ('<div id="corePrice_feature_div"><span class="a-offscreen">73,40 €</span></div>'
+                       '<a id="pep-signup-link" class="prime-signup-ingress">Trete Prime bei und kaufe diesen Artikel bei 73,40 €</a>')
+        raw = scanner.parse(html)
+        self.assertEqual(raw["price"], "73,40 €")
+        self.assertEqual(raw["pep"], "Trete Prime bei und kaufe diesen Artikel bei 73,40 €")
+        self.assertEqual(scanner.parse(GOOD)["pep"], "")
+
     # ---- 2.1.4
     def test_progress_reports_pages_per_store_throttled(self):
         state = {"stores": ["it", "fr"], "products": [

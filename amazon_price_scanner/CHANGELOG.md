@@ -1,3 +1,8 @@
+# 2.1.5
+
+- Reads Amazon's "join Prime to buy this item at X" line: the dashboard and the alerts mark members-only (Prime)
+  prices, and show the guest price when Amazon shows both.
+
 # 2.1.4
 
 - Live scan progress for the dashboard: pages read / planned per store, the product being read, and each store's
