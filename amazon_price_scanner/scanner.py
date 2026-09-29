@@ -31,6 +31,49 @@ FORCE = "--force" in sys.argv or os.environ.get("FORCE", "").lower() == "true"
 DRY = "--dry" in sys.argv
 TRANSPORT = os.environ.get("TRANSPORT", "requests")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+# The site can move to another Cloudflare account: the old copy answers "moved to <url>" and the add-on follows by
+# itself (remembered in /data, so a restart keeps it; editing worker_url in the options starts over from that value).
+CONFIGURED_WORKER = WORKER
+MOVE_FILE = DATA_DIR / "worker_moved.json"
+
+
+def _site_url(u):
+    return isinstance(u, str) and re.fullmatch(r"https://[a-z0-9.-]+", u, re.I) is not None
+
+
+def load_move():
+    global WORKER
+    try:
+        m = json.loads(MOVE_FILE.read_text())
+        if m.get("from") == CONFIGURED_WORKER and _site_url(m.get("to")):
+            WORKER = m["to"]
+            print("site address (moved):", WORKER, flush=True)
+    except Exception:
+        pass
+
+
+def follow_move(answer):
+    """A 409 answer from a paused copy of the site: switch to the address it names."""
+    global WORKER
+    to = (answer or {}).get("movedTo")
+    if not _site_url(to) or to.rstrip("/") == WORKER:
+        return False
+    WORKER = to.rstrip("/")
+    print("the site moved - now using", WORKER, flush=True)
+    try:
+        MOVE_FILE.write_text(json.dumps({"from": CONFIGURED_WORKER, "to": WORKER}))
+    except Exception:
+        pass
+    return True
+
+
+def moved(response):
+    if response.status_code != 409:
+        return False
+    try:
+        return follow_move(response.json())
+    except ValueError:
+        return False
 REQUEST_DELAY = max(5, float(os.environ.get("REQUEST_DELAY", "30")))
 # Adaptive pace: after CLEAN_SCANS_TO_SPEED_UP full scans without any challenge the gap between pages shrinks by
 # PACE_STEP seconds, down to MIN_REQUEST_DELAY; the first challenge puts it straight back to REQUEST_DELAY.
@@ -40,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.6"
+VERSION = "2.1.7"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -803,6 +846,8 @@ def check_job(job):
 
 def poll_jobs():
     r = requests.get(WORKER + "/api/job-next", headers=AUTH, timeout=15)
+    if moved(r):
+        return False
     r.raise_for_status()
     job = r.json()
     if "request" in job:                 # the Worker answers the "scan now" question in the same call
@@ -958,6 +1003,8 @@ def send_partial(slot, store, data):
 
 def send_ingest(payload):
     r = requests.post(WORKER + "/api/ingest", headers=AUTH, json=payload, timeout=120)
+    if moved(r):                         # a result sent to a paused copy: send it to the new address right away
+        r = requests.post(WORKER + "/api/ingest", headers=AUTH, json=payload, timeout=120)
     print("ingest:", r.status_code, flush=True)
     if r.ok:
         for row in r.json().get("rows", []):
@@ -967,6 +1014,8 @@ def send_ingest(payload):
 
 def main():
     response = requests.get(WORKER + "/api/state", headers=AUTH, timeout=60)
+    if moved(response):
+        return 0                         # the next check (seconds away) asks the new address
     response.raise_for_status()
     state = response.json()
     if str(state.get("scanRequest") or "").startswith("debug"):
@@ -1108,6 +1157,7 @@ def job_loop():
 
 
 if __name__ == "__main__":
+    load_move()
     if "--loop" in sys.argv:
         print(f"amazon price scanner {VERSION} started (transport={TRANSPORT}; scans checked every 2 minutes or at once on request, "
               f"product checks every {JOB_POLL}s, {CHECK_CONCURRENCY} stores in parallel)", flush=True)

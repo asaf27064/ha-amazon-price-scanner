@@ -389,6 +389,25 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
 
+    # ---- 2.1.7
+    def test_follows_the_site_to_its_new_address(self):
+        old = scanner.WORKER
+        paused = Mock(status_code=409)
+        paused.json.return_value = {"ok": False, "paused": True, "movedTo": "https://amazon-price-tracker.newacct.workers.dev"}
+        with patch.object(scanner, "MOVE_FILE", Path(self.tmp.name) / "moved.json"),                 patch.object(scanner.requests, "get", return_value=paused):
+            self.assertEqual(scanner.main(), 0)
+            self.assertEqual(scanner.WORKER, "https://amazon-price-tracker.newacct.workers.dev")
+            scanner.WORKER = old
+            scanner.load_move()
+            self.assertEqual(scanner.WORKER, "https://amazon-price-tracker.newacct.workers.dev", "remembered across a restart")
+            self.assertFalse(scanner.follow_move({"movedTo": "javascript:alert(1)"}), "only a plain https address")
+            scanner.CONFIGURED_WORKER, cfg = "https://other.example", scanner.CONFIGURED_WORKER
+            scanner.WORKER = old
+            scanner.load_move()
+            self.assertEqual(scanner.WORKER, old, "a new worker_url in the options wins over the remembered move")
+            scanner.CONFIGURED_WORKER = cfg
+        scanner.WORKER = old
+
     # ---- 2.1.6
     def test_job_poll_also_wakes_a_waiting_scan(self):
         resp = Mock(ok=True)

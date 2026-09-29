@@ -1,3 +1,8 @@
+# 2.1.7
+
+- Follows the site when it moves to another Cloudflare account: the old copy answers "moved to <address>" and the
+  add-on switches by itself (kept in /data across restarts). Changing worker_url in the options still wins.
+
 # 2.1.6
 
 - Fewer requests to the site (the Cloudflare free plan counts every one): the product-check poll and the
