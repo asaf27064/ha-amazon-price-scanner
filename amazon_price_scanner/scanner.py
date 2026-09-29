@@ -40,7 +40,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.5"
+VERSION = "2.1.6"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -48,7 +48,7 @@ TURBO = os.environ.get("TURBO", "false").lower() == "true"
 TURBO_PARALLEL = min(3, max(1, int(os.environ.get("TURBO_PARALLEL_STORES", "3"))))
 TURBO_DELAY = min(30.0, max(0.0, float(os.environ.get("TURBO_DELAY", "0"))))
 TURBO_REST = 3
-JOB_POLL = 5
+JOB_POLL = 10       # one check every 10 s: a product check to run, and a waiting "scan now" (same answer)
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
 
 DOMAIN = {"it": "it", "fr": "fr", "es": "es", "de": "de", "uk": "co.uk", "us": "com"}
@@ -805,6 +805,9 @@ def poll_jobs():
     r = requests.get(WORKER + "/api/job-next", headers=AUTH, timeout=15)
     r.raise_for_status()
     job = r.json()
+    if "request" in job:                 # the Worker answers the "scan now" question in the same call
+        _COMBINED["on"] = True
+        wake_for(job.pop("request"))
     if not job.get("id"):
         return False
     result = check_job(job)
@@ -857,7 +860,7 @@ FOLLOWUP = {"slot": None, "stores": [], "after": 0.0, "kept": {}}          # sto
 # Pages read / planned per store, the product being read and the store's state. Sent at most every PROGRESS_EVERY
 # seconds (each report is one write on the site), right away when a store starts waiting, finishes or pauses.
 # A report also tells the Worker a precise scan is running (it then holds back its light fallback scan).
-PROGRESS_EVERY = 12
+PROGRESS_EVERY = 30
 _PROG_LOCK = threading.Lock()
 PROG = {"slot": None, "only": None, "request": None, "started": 0, "parallel": 1, "stores": {}, "sent": 0.0}
 
@@ -924,14 +927,19 @@ def store_finished(store, result):
 # a "scan now" pressed on the dashboard wakes the scan loop within seconds (the job thread looks every few polls)
 WAKE = threading.Event()
 _WOKEN = {"request": None}
+_COMBINED = {"on": False}                # the Worker sends the waiting request with the job answer (no extra call)
 
 
-def poll_scan_request():
-    r = requests.get(WORKER + "/api/scan-pending", headers=AUTH, timeout=15)
-    req = r.json().get("request") if r.ok else None
+def wake_for(req):
     if req and req != PENDING["request"] and req != _WOKEN["request"]:
         _WOKEN["request"] = req
         WAKE.set()
+
+
+def poll_scan_request():
+    """Only for an older Worker that doesn't send the request with the job answer."""
+    r = requests.get(WORKER + "/api/scan-pending", headers=AUTH, timeout=15)
+    wake_for(r.json().get("request") if r.ok else None)
 
 
 _PARTIAL_LOCK = threading.Lock()
@@ -1091,7 +1099,7 @@ def job_loop():
         except Exception as e:
             print("job error:", type(e).__name__, flush=True)
         n += 1
-        if n % 3 == 0:
+        if not _COMBINED["on"] and n % 2 == 0:
             try:
                 poll_scan_request()
             except Exception:

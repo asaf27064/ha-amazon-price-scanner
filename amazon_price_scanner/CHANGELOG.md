@@ -1,3 +1,9 @@
+# 2.1.6
+
+- Fewer requests to the site (the Cloudflare free plan counts every one): the product-check poll and the
+  "scan now" check are one call every 10 seconds (was two, every 5 and 15 seconds - about 23,000 a day, now 8,600);
+  scan progress is reported every 30 seconds (was 12).
+
 # 2.1.5
 
 - Reads Amazon's "join Prime to buy this item at X" line: the dashboard and the alerts mark members-only (Prime)

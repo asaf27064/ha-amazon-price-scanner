@@ -389,6 +389,21 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
 
+    # ---- 2.1.6
+    def test_job_poll_also_wakes_a_waiting_scan(self):
+        resp = Mock(ok=True)
+        resp.json.return_value = {"request": "2026-09-29 13:00:01 #dd44"}
+        scanner.WAKE.clear()
+        scanner._WOKEN["request"] = None
+        scanner._COMBINED["on"] = False
+        scanner.PENDING.update(request=None)
+        with patch.object(scanner.requests, "get", return_value=resp), patch.object(scanner, "check_job") as job:
+            self.assertFalse(scanner.poll_jobs())
+            self.assertTrue(scanner.WAKE.is_set())
+            self.assertTrue(scanner._COMBINED["on"], "no separate scan-pending calls from now on")
+            job.assert_not_called()
+        scanner._COMBINED["on"] = False
+
     # ---- 2.1.5
     def test_prime_join_line_is_read(self):
         html = GOOD + ('<div id="corePrice_feature_div"><span class="a-offscreen">73,40 €</span></div>'
@@ -415,8 +430,8 @@ class ScannerTest(unittest.TestCase):
             scanner.progress_store("it", force=False, state="running")
             scanner.progress_item("it", "a")
             scanner.progress_item("it", "a", done=True)
-            self.assertEqual(len(sent), 1, "page updates within 12 s are not sent")
-            clock[0] += 13
+            self.assertEqual(len(sent), 1, "page updates within 30 s are not sent")
+            clock[0] += 31
             scanner.progress_item("it", "a", done=True)
             self.assertEqual(len(sent), 2)
             self.assertEqual(sent[1]["stores"]["it"], {"total": 3, "done": 2, "state": "running", "cur": "a"})
