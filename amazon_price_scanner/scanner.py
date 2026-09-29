@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.7"
+VERSION = "2.1.8"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -905,7 +905,7 @@ FOLLOWUP = {"slot": None, "stores": [], "after": 0.0, "kept": {}}          # sto
 # Pages read / planned per store, the product being read and the store's state. Sent at most every PROGRESS_EVERY
 # seconds (each report is one write on the site), right away when a store starts waiting, finishes or pauses.
 # A report also tells the Worker a precise scan is running (it then holds back its light fallback scan).
-PROGRESS_EVERY = 30
+PROGRESS_EVERY = 12
 _PROG_LOCK = threading.Lock()
 PROG = {"slot": None, "only": None, "request": None, "started": 0, "parallel": 1, "stores": {}, "sent": 0.0}
 

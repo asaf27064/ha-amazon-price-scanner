@@ -449,8 +449,8 @@ class ScannerTest(unittest.TestCase):
             scanner.progress_store("it", force=False, state="running")
             scanner.progress_item("it", "a")
             scanner.progress_item("it", "a", done=True)
-            self.assertEqual(len(sent), 1, "page updates within 30 s are not sent")
-            clock[0] += 31
+            self.assertEqual(len(sent), 1, "page updates within 12 s are not sent")
+            clock[0] += 13
             scanner.progress_item("it", "a", done=True)
             self.assertEqual(len(sent), 2)
             self.assertEqual(sent[1]["stores"]["it"], {"total": 3, "done": 2, "state": "running", "cur": "a"})

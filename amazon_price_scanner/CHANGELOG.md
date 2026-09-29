@@ -1,3 +1,7 @@
+# 2.1.8
+
+- Smooth scan progress again (the site is on Workers Paid): progress is reported every 12 seconds (was 30).
+
 # 2.1.7
 
 - Follows the site when it moves to another Cloudflare account: the old copy answers "moved to <address>" and the
