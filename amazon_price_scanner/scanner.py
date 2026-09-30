@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.8"
+VERSION = "2.1.9"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -195,7 +195,8 @@ def parse(html):
         "seller": txt("#merchantInfoFeature_feature_div", 200),
         "returns": txt("#returnsInfoFeature_feature_div", 300),
         "used": txt("#usedBuySection", 200),
-        "pep": txt("#pep-signup-link", 160),     # "join Prime to buy this item at X": a members-only price
+        "pep": txt("#pep-signup-link", 160),
+        "promo": txt("#promoPriceBlockMessage_feature_div", 400),   # coupons / checkout discounts / multi-buy     # "join Prime to buy this item at X": a members-only price
         "buybox": txt("#buybox", 800),
         "global": txt("#amazonGlobal_feature_div", 700),
         "image": image,
@@ -307,7 +308,7 @@ SHIP_L = r"Ships from|Dispatches from|Spedito da|Speditore|Expédié par|Expédi
 SOLD_L = (r"Ships from and sold by|Dispatched from and sold by|Venduto e spedito da|Vendu et expédié par|"
           r"Vendido y enviado por|Verkauf und Versand durch|"
           r"Sold by|Venduto da|Venditore|Vendu par|Vendeur|Vendido por|Vendedor|Verkauf durch|Verkäufer")
-ALT_KEYS = ("to", "title", "price", "price2", "pep", "delivery", "delivery2", "avail", "seller", "returns", "buybox", "global")
+ALT_KEYS = ("to", "title", "price", "price2", "pep", "promo", "delivery", "delivery2", "avail", "seller", "returns", "buybox", "global")
 
 
 def seller_kind(raw):

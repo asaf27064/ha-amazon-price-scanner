@@ -1,3 +1,8 @@
+# 2.1.9
+
+- Reads Amazon's coupon / checkout-discount box (from the page already loaded - no extra requests): the site counts
+  a coupon or "save X at checkout" in the price (can be turned off in the settings) and shows multi-item offers.
+
 # 2.1.8
 
 - Smooth scan progress again (the site is on Workers Paid): progress is reported every 12 seconds (was 30).

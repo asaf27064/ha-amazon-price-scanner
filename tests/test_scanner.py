@@ -389,6 +389,12 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(send.call_count, 2)
 
+    # ---- 2.1.9
+    def test_coupon_box_is_read(self):
+        html = GOOD + '<div id="promoPriceBlockMessage_feature_div"> Coupon: <span>Apply 10% coupon</span> Shop items | Terms </div>'
+        self.assertEqual(scanner.parse(html)["promo"], "Coupon: Apply 10% coupon Shop items | Terms")
+        self.assertEqual(scanner.parse(GOOD)["promo"], "")
+
     # ---- 2.1.7
     def test_follows_the_site_to_its_new_address(self):
         old = scanner.WORKER
