@@ -248,6 +248,37 @@ class ScannerTest(unittest.TestCase):
         client.assert_not_called()
         self.assertTrue(res["stores"]["fr"]["raw"]["status"].startswith("blocked"))
 
+    # ---- 2.1.11: "stop the scan" from the dashboard
+    def test_stop_answer_ends_the_scan_and_keeps_what_was_read(self):
+        good = scanner.parse(GOOD)
+        calls = []
+
+        def fetch(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:                      # after the first page the dashboard's "stop" arrives
+                scanner.STOP["on"] = True
+            return good, ""
+        self.addCleanup(lambda: scanner.STOP.update(on=False))
+        with patch.object(scanner, "fetch", side_effect=fetch), patch.object(scanner.time, "sleep"):
+            items = scanner.scan_store(self.state, "it")["items"]
+        self.assertEqual(len(calls), 1, "no page is opened after the stop")
+        self.assertIsNone(items[0]["raw"].get("status"))
+        self.assertTrue(all(i["raw"]["status"] == "skipped (stopped)" for i in items[1:]) and len(items) >= 3)
+        self.assertNotIn("it", scanner.load_cooldowns())
+
+    def test_progress_answer_stop_sets_the_flag(self):
+        state = {"stores": ["it"], "products": [{"key": "a", "skip": [], "asinsByStore": {"it": ["A1"]}}]}
+        self.addCleanup(lambda: scanner.STOP.update(on=False))
+        self.addCleanup(scanner.progress_end)
+        answer = Mock(ok=True)
+        answer.json.return_value = {"ok": True}
+        with patch.object(scanner.requests, "post", return_value=answer), patch.object(scanner, "DRY", False):
+            scanner.progress_start("2026-10-06 15", state, ["it"])
+            self.assertFalse(scanner.STOP["on"])
+            answer.json.return_value = {"ok": True, "kept": True, "stop": True}
+            scanner.progress_store("it", state="running")
+            self.assertTrue(scanner.STOP["on"])
+
     # ---- 1.3.0: robustness
     def test_one_missing_page_does_not_stop_the_store(self):
         good = scanner.parse(GOOD)

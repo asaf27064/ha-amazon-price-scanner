@@ -4,6 +4,8 @@
   video - only what the prices are read from. Scripts, styles and Amazon's own requests are untouched, so the page's
   text is the same. A store that shows a robot check goes back to ordinary, complete pages for a day by itself.
   (2.1.10's shorter wait did not help: on deal days the time goes to loading the heavy page itself.)
+- "Stop the scan" from the dashboard: the scan reads no more pages (the one being loaded finishes) and sends what it
+  has; the pages it didn't read keep their prices.
 
 # 2.1.10
 

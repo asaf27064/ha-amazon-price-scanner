@@ -653,7 +653,9 @@ def scan_store(state, store, diagnostic=False):
                 continue
             for asin in asins:
                 progress_item(store, p["key"])
-                if blocked or cooling or load_cooldowns().get(store, 0) > time.time():
+                if STOP["on"] and not diagnostic:
+                    raw = {"status": "skipped (stopped)"}
+                elif blocked or cooling or load_cooldowns().get(store, 0) > time.time():
                     raw = {"status": "blocked (store cooldown)"}
                 elif aborted:
                     raw = {"status": "skipped (store aborted)"}
@@ -907,6 +909,9 @@ FOLLOWUP = {"slot": None, "stores": [], "after": 0.0, "kept": {}}          # sto
 # seconds (each report is one write on the site), right away when a store starts waiting, finishes or pauses.
 # A report also tells the Worker a precise scan is running (it then holds back its light fallback scan).
 PROGRESS_EVERY = 12
+# "stop the scan" on the dashboard: the Worker answers this scan's progress report with {"stop": true}. No more
+# pages are read (the one being loaded finishes); what was read is sent, marked "stopped".
+STOP = {"on": False}
 _PROG_LOCK = threading.Lock()
 PROG = {"slot": None, "only": None, "request": None, "started": 0, "parallel": 1, "stores": {}, "sent": 0.0}
 
@@ -960,7 +965,10 @@ def progress_send(force=False):
     if DRY:
         return
     try:
-        requests.post(WORKER + "/api/progress", headers=AUTH, json=body, timeout=10)
+        r = requests.post(WORKER + "/api/progress", headers=AUTH, json=body, timeout=10)
+        if r.ok and r.json().get("stop") is True and not STOP["on"]:
+            STOP["on"] = True
+            print("stop requested on the dashboard - no more pages in this scan", flush=True)
     except Exception:
         pass
 
@@ -1061,6 +1069,7 @@ def main():
     # "started" and "request": the site keeps a "scan now" pressed while this scan was already running
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": started, "request": request, "stores": {}}
     _BACKOFF["on"] = False
+    STOP["on"] = False
     t0 = time.monotonic()
     only = request.split(" p:", 1)[1].split(",") if product_scan else None
     progress_start(slot, state, state["stores"], only, request)
@@ -1083,15 +1092,21 @@ def main():
             payload["stores"][store] = one(store)[1]
     payload["elapsed"] = round(time.monotonic() - t0, 1)
     progress_end()
+    stopped = STOP["on"]
+    STOP["on"] = False
+    if stopped:
+        payload["stopped"] = True          # the site keeps what was read and doesn't count this as the slot's scan
     challenges, clean = scan_was_clean(payload["stores"])
-    pace = update_pace(challenges, clean)
+    pace = update_pace(challenges, clean and not stopped)   # a stopped scan is never "a clean full scan"
     pace = turbo_after_scan(challenges, pages_read(payload["stores"]) > 0)
     print("pace: next gap between pages", pace["delay"], "s", ("(turbo rests for %d scans)" % pace["rest"]) if TURBO and pace["rest"] else "", flush=True)
     if DRY:
         print("dry run - not sending")
         return 0
     PENDING.update(slot=PENDING["slot"] if product_scan else slot, payload=payload, tries=1, request=request)
-    if not product_scan:
+    if stopped:
+        FOLLOWUP["stores"] = []            # stopped by the user: no second visit to paused stores either
+    elif not product_scan:
         plan_followup(slot, payload)
     ok = send_ingest(payload)
     if ok:
@@ -1118,6 +1133,7 @@ def run_followup(state, slot):
     payload = {"slot": slot, "engine": "home", "version": VERSION, "started": datetime.now(IL).strftime("%Y-%m-%d %H:%M"),
                "request": None, "stores": {}}
     t0 = time.monotonic()
+    STOP["on"] = False
     progress_start(slot, state, stores)
     for store in stores:
         progress_store(store, force=False, state="running")
@@ -1128,6 +1144,9 @@ def run_followup(state, slot):
             send_partial(slot, store, payload["stores"][store])
     payload["elapsed"] = round(time.monotonic() - t0, 1)
     progress_end()
+    if STOP["on"]:
+        payload["stopped"] = True
+    STOP["on"] = False
     challenges, _clean = scan_was_clean({s: payload["stores"][s] for s in stores})
     pace = update_pace(challenges, False)                # a partial scan never counts as a clean full scan
     print("pace: next gap between pages", pace["delay"], "s", flush=True)
