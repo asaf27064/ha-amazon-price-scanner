@@ -178,10 +178,13 @@ class BrowserClient:
                 "css selector", '#productTitle, form[action*="validateCaptcha"], #captchacharacters'))
         except TimeoutException:
             pass
-        # Delivery fragments can arrive after the product title at DOMContentLoaded.
+        # Delivery fragments can arrive after the product title at DOMContentLoaded: wait for the delivery block
+        # itself (or the "unavailable" box), not for the whole page - on deal days the page keeps loading widgets
+        # for a long time after the price and delivery are there (6.10: 28 s a page instead of 7, scans of 80 minutes)
         try:
-            WebDriverWait(self.driver, 15).until(
-                lambda d: d.execute_script("return document.readyState") == "complete")
+            WebDriverWait(self.driver, 10).until(lambda d: d.find_elements(
+                "css selector", '#mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage, #availability, #outOfStock, #usedBuySection')
+                or d.execute_script("return document.readyState") == "complete")
         except TimeoutException:
             pass
         raw = parse(self.driver.page_source)

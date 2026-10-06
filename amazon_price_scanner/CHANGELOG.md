@@ -1,3 +1,9 @@
+# 2.1.10
+
+- Faster pages on deal days: after the product title, the scanner waits for the delivery block itself (up to 10 s)
+  instead of the whole page finishing to load (15 s) - on Prime Day pages keep loading widgets long after the price
+  and delivery are there (28 s a page instead of 7; scans of 80 minutes that fell behind the hourly schedule).
+
 # 2.1.9
 
 - Reads Amazon's coupon / checkout-discount box (from the page already loaded - no extra requests): the site counts
