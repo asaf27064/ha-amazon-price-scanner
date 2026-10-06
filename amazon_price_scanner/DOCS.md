@@ -13,6 +13,9 @@ price tracker (dashboard + Telegram alerts). It checks every 2 minutes whether a
 - **request_delay** – minimum seconds after each Amazon page, default 30 (minimum 5). This applies
   to scans, product checks, searches and seller offers together. Existing installations keep their
   configured value; set 30 explicitly after upgrading if it was 10.
+- **light_pages** – on by default: the browsers don't download pictures, fonts and video (the prices are read
+  from the page's text). A store that shows a robot check loads complete pages for a day. Turn off to load
+  everything, like 2.1.10 and earlier.
 - **ipv4_only** – restricts Python HTTP requests to IPv4. This does not change
   Chromium's networking. Leave false unless network diagnostics require it.
 

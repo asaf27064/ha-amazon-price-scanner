@@ -34,6 +34,10 @@ export TURBO_DELAY=0
 if bashio::config.has_value 'turbo_delay'; then
     export TURBO_DELAY="$(bashio::config 'turbo_delay')"
 fi
+export LIGHT_PAGES=true
+if bashio::config.has_value 'light_pages'; then
+    export LIGHT_PAGES="$(bashio::config 'light_pages')"
+fi
 export DATA_DIR=/data/scanner
 export HOME=/data/scanner/home
 mkdir -p "$DATA_DIR" "$HOME"

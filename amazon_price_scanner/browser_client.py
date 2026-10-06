@@ -13,6 +13,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 WARM_UP_AFTER = 3 * 3600      # a store not visited for this long gets its home page first, like a person would
 TIMEZONE = "Asia/Jerusalem"
+# Light pages: pictures, fonts and video are not downloaded (the scanner reads text only - also the product picture's
+# address comes from the page's HTML). Scripts, styles and Amazon's own requests are untouched. On deal days a page
+# carries hundreds of pictures and autoplay video, and three browsers at once took ~30 s a page instead of ~7.
+LIGHT_PAGES = os.environ.get("LIGHT_PAGES", "true").lower() != "false"
+LIGHT_BLOCKED = ["*.jpg*", "*.jpeg*", "*.png*", "*.gif*", "*.webp*", "*.avif*", "*.woff*", "*.ttf*", "*.otf*",
+                 "*.mp4*", "*.webm*", "*.m3u8*", "*.m4s*", "*.mp3*"]
+LIGHT_OFF_AFTER_CHALLENGE = 24 * 3600   # a store that showed a robot check gets ordinary (full) pages for a day
 
 
 class BrowserClient:
@@ -45,8 +52,11 @@ class BrowserClient:
         self.driver = webdriver.Chrome(
             service=Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver")), options=options)
         self.driver.set_page_load_timeout(45)
+        self.light = False
         try:
             self._look_ordinary()
+            if LIGHT_PAGES and time.time() >= self._light_off_until():
+                self._set_light(True)
             self._restore_session_cookies()
             existing = self.driver.execute_cdp_cmd("Network.getCookies", {"urls": [self.origin]})
             has_session = any(c["name"] == "session-id" for c in existing.get("cookies", []))
@@ -87,6 +97,31 @@ class BrowserClient:
         except Exception as e:
             print("browser: could not adjust the presentation:", type(e).__name__, flush=True)
 
+    def _light_off_until(self):
+        try:
+            return float((self.profile / "light-off-until").read_text())
+        except (FileNotFoundError, ValueError):
+            return 0.0
+
+    def _set_light(self, on):
+        try:
+            self.driver.execute_cdp_cmd("Network.enable", {})
+            self.driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": LIGHT_BLOCKED if on else []})
+            self.light = on
+        except Exception as e:
+            print("browser: light pages not available:", type(e).__name__, flush=True)
+            self.light = False
+
+    def full_pages(self):
+        """A robot check appeared: this store loads ordinary, complete pages from now on (and for a day)."""
+        if not self.light:
+            return
+        try:
+            (self.profile / "light-off-until").write_text(str(time.time() + LIGHT_OFF_AFTER_CHALLENGE))
+        except OSError:
+            pass
+        self._set_light(False)
+
     def _last_visit(self):
         try:
             return float((self.profile / "last-visit").read_text())
@@ -121,6 +156,8 @@ class BrowserClient:
         self._note_visit()
         raw = parse(self.driver.page_source)
         raw["transport"] = "browser"
+        if raw.get("captcha"):
+            self.full_pages()
         return raw
 
     def _navigate(self, url):
@@ -190,6 +227,8 @@ class BrowserClient:
         raw = parse(self.driver.page_source)
         raw["transport"] = "browser"
         if raw.get("captcha") or not raw.get("title"):
+            if raw.get("captcha"):
+                self.full_pages()
             if not raw.get("captcha"):
                 raw["status"] = "error: product page missing"
                 raw["pageMessage"] = self.driver.find_element("tag name", "body").text[:500]

@@ -1,3 +1,10 @@
+# 2.1.11
+
+- Light pages (option `light_pages`, on by default): the scanner's browsers no longer download pictures, fonts and
+  video - only what the prices are read from. Scripts, styles and Amazon's own requests are untouched, so the page's
+  text is the same. A store that shows a robot check goes back to ordinary, complete pages for a day by itself.
+  (2.1.10's shorter wait did not help: on deal days the time goes to loading the heavy page itself.)
+
 # 2.1.10
 
 - Faster pages on deal days: after the product title, the scanner waits for the delivery block itself (up to 10 s)

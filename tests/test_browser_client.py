@@ -51,7 +51,7 @@ class Driver:
 
     def execute_cdp_cmd(self, method, args):
         self.cdp.append((method, args))
-        if method in ("Network.setUserAgentOverride", "Emulation.setTimezoneOverride"):
+        if method in ("Network.setUserAgentOverride", "Emulation.setTimezoneOverride", "Network.enable", "Network.setBlockedURLs"):
             return {}
         if method == "Network.getCookies":
             return {"cookies": self.cookies}
@@ -93,6 +93,52 @@ class BrowserSessionTest(unittest.TestCase):
         driver = Driver()
         client = self.client(driver, "session-id=original; auth-token=private")
         self.assertEqual([c["name"] for c in driver.cookies], ["session-id"])
+        client.close()
+
+    # ---- 2.1.11: light pages
+    def blocked(self, driver):
+        return [a["urls"] for m, a in driver.cdp if m == "Network.setBlockedURLs"]
+
+    def test_light_pages_block_pictures_fonts_and_video_only(self):
+        driver = Driver()
+        client = self.client(driver, "session-id=original")
+        urls = self.blocked(driver)[-1]
+        self.assertTrue(client.light)
+        self.assertIn("*.jpg*", urls); self.assertIn("*.woff*", urls); self.assertIn("*.mp4*", urls)
+        self.assertFalse([u for u in urls if "js" in u or "css" in u or "amazon" in u], "scripts, styles and Amazon's own requests are never blocked")
+        client.close()
+
+    def test_a_robot_check_brings_back_full_pages_for_a_day(self):
+        driver = Driver()
+        client = self.client(driver, "session-id=original")
+        raw, _jar = client.fetch("B000000001", lambda html: {"title": "", "captcha": True}, "jar")
+        self.assertTrue(raw["captcha"])
+        self.assertEqual(self.blocked(driver)[-1], [], "blocking lifted in the same browser (the reload is a full page)")
+        self.assertFalse(client.light)
+        client.close()
+        again = Driver()
+        second = self.client(again, "session-id=original")
+        self.assertEqual(self.blocked(again), [], "the next scans of this store start with full pages")
+        second.close()
+        with patch.object(browser.time, "time", return_value=browser.time.time() + 25 * 3600):
+            later = Driver()
+            third = self.client(later, "session-id=original")
+            self.assertTrue(third.light, "a day later light pages are back")
+            third.close()
+
+    def test_light_pages_can_be_turned_off(self):
+        with patch.object(browser, "LIGHT_PAGES", False):
+            driver = Driver()
+            client = self.client(driver, "session-id=original")
+            self.assertEqual(self.blocked(driver), [])
+            client.close()
+
+    def test_an_ordinary_page_reads_the_same_with_light_pages(self):
+        driver = Driver()
+        client = self.client(driver, "session-id=original")
+        raw, _jar = client.fetch("B000000001", lambda html: {"title": "x", "captcha": False, "image": "https://m.media-amazon.com/images/I/a.jpg"}, "jar")
+        self.assertEqual(raw["image"], "https://m.media-amazon.com/images/I/a.jpg")
+        self.assertTrue(client.light)
         client.close()
 
     # ---- 2.0.8
