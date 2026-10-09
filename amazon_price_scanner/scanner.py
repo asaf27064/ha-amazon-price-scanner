@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.11"
+VERSION = "2.1.12"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -91,6 +91,16 @@ TURBO = os.environ.get("TURBO", "false").lower() == "true"
 TURBO_PARALLEL = min(3, max(1, int(os.environ.get("TURBO_PARALLEL_STORES", "3"))))
 TURBO_DELAY = min(30.0, max(0.0, float(os.environ.get("TURBO_DELAY", "0"))))
 TURBO_REST = 3
+# How many stores to read at once is learned from the scans themselves (never more than TURBO_PARALLEL): on a small
+# host three browsers at once can be far slower than one after another (measured 6-9.10.2026: ~30 s a page with
+# three, ~4 s with one). After each clean turbo scan the seconds-per-page of the whole scan is remembered per
+# level; a level that hasn't been tried is tried when the pages look choked (or light), and the fastest one stays.
+PAR_FORGET = 7 * 86400      # a measurement older than this is forgotten (the host and the pages change)
+PAR_CHOKED = 12.0           # seconds to load one page: the browsers are getting in each other's way
+PAR_MIN_PAGES = 60          # a short (product-only) scan doesn't teach anything
+# A store never gets two pages closer than this - the pace Amazon accepted for weeks (three stores at once, ~7 s a
+# page). Without it one store alone would get a page every ~4 s when the stores are read one after another.
+TURBO_MIN_INTERVAL = 6.0
 JOB_POLL = 10       # one check every 10 s: a product check to run, and a waiting "scan now" (same answer)
 MAX_INGEST_RETRIES = 5          # a failed ingest is re-sent (same payload), the slot is not rescanned
 
@@ -357,7 +367,7 @@ _PAGE_LOCK = threading.Lock()
 _NEXT_PAGE_AT = 0.0
 _TURBO_LOCKS = {store: threading.Lock() for store in DOMAIN}   # turbo: each store keeps its own queue and pace
 _TURBO_NEXT = {store: 0.0 for store in DOMAIN}
-_INFLIGHT = threading.BoundedSemaphore(TURBO_PARALLEL)        # turbo: at most this many pages loading at once
+_INFLIGHT = {"sem": threading.BoundedSemaphore(TURBO_PARALLEL)}   # turbo: at most this many pages loading at once (set per scan)
 _BACKOFF = {"on": False}                                      # a challenge in this scan: back to the safe path
 _PAGE_COUNTS = {store: 0 for store in DOMAIN}
 _LOAD_SECONDS = {store: 0.0 for store in DOMAIN}
@@ -404,8 +414,13 @@ def load_pace():
     except (FileNotFoundError, ValueError):
         pace = {}
     delay = float(pace.get("delay", REQUEST_DELAY))
+    perf = pace.get("perf") if isinstance(pace.get("perf"), dict) else {}
+    try:
+        par = min(TURBO_PARALLEL, max(1, int(pace.get("par", TURBO_PARALLEL))))
+    except (TypeError, ValueError):
+        par = TURBO_PARALLEL
     return {"delay": min(REQUEST_DELAY, max(MIN_REQUEST_DELAY, delay)), "clean": int(pace.get("clean", 0)),
-            "rest": int(pace.get("rest", 0))}
+            "rest": int(pace.get("rest", 0)), "par": par, "perf": perf}
 
 
 def save_pace(pace):
@@ -444,6 +459,74 @@ def turbo_now():
 
 def effective_delay():
     return TURBO_DELAY if turbo_now() else current_delay()
+
+
+def turbo_parallel():
+    """How many stores this turbo scan reads at once (learned; the configured number at most)."""
+    return load_pace()["par"]
+
+
+def tune_parallel(par, pages, elapsed, load):
+    """After a clean turbo scan: remember how fast this level was, and choose the level for the next scan."""
+    if not TURBO or pages < PAR_MIN_PAGES or elapsed <= 0:
+        return None
+    with _PACE_LOCK:
+        pace = load_pace()
+        now = time.time()
+        perf = {k: v for k, v in pace["perf"].items()
+                if isinstance(v, dict) and now - v.get("t", 0) < PAR_FORGET and k.isdigit() and 1 <= int(k) <= TURBO_PARALLEL}
+        perf[str(par)] = {"s": round(elapsed / pages, 2), "t": now}
+        per_page = load / pages
+        nxt = par
+        if par > 1 and str(par - 1) not in perf and per_page > PAR_CHOKED:
+            nxt = par - 1                                   # choked: see whether fewer at once is faster
+        elif par < TURBO_PARALLEL and str(par + 1) not in perf and per_page < PAR_CHOKED / 2:
+            nxt = par + 1                                   # light pages: see whether more at once is faster
+        else:
+            best = min(perf, key=lambda k: perf[k]["s"])
+            if int(best) != par and perf[best]["s"] < perf[str(par)]["s"] * 0.9:
+                nxt = int(best)
+        pace.update(par=nxt, perf=perf)
+        save_pace(pace)
+    print("parallel: %d stores at once took %.1f s a page (%.1f s to load one); next scan: %d" % (par, elapsed / pages, per_page, nxt), flush=True)
+    return nxt
+
+
+# ------------------------------------------------------------------ the host (why a scan was slow)
+_HOST_PEAK = {}
+
+
+def host_info():
+    """Memory, load and temperature of the machine the add-on runs on (whatever the container lets us read)."""
+    info = {"cpus": os.cpu_count()}
+    try:
+        mem = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            mem[key] = int(rest.split()[0])
+        info["mem_total_mb"] = mem["MemTotal"] // 1024
+        info["mem_avail_mb"] = mem.get("MemAvailable", 0) // 1024
+        info["swap_used_mb"] = (mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)) // 1024
+    except Exception:
+        pass
+    try:
+        info["load1"] = round(os.getloadavg()[0], 2)
+    except Exception:
+        pass
+    try:
+        info["temp_c"] = round(int(Path("/sys/class/thermal/thermal_zone0/temp").read_text()) / 1000, 1)
+    except Exception:
+        pass
+    return info
+
+
+def host_sample():
+    """Called along the scan: keeps the worst moment (least free memory, most swap, highest load / temperature)."""
+    now = host_info()
+    for key, pick in (("mem_avail_mb", min), ("swap_used_mb", max), ("load1", max), ("temp_c", max)):
+        if key in now:
+            _HOST_PEAK[key] = pick(_HOST_PEAK[key], now[key]) if key in _HOST_PEAK else now[key]
+    return now
 
 
 def turbo_after_scan(challenges, read_pages=True):
@@ -541,13 +624,14 @@ def _turbo_page(store, get):
             raise Blocked()
         if not turbo_now():
             return _HANDOVER
-        with _INFLIGHT:
+        with _INFLIGHT["sem"]:
             if not turbo_now():             # a challenge while this page waited for a free slot
                 return _HANDOVER
+            started = time.monotonic()
             try:
                 return _load_page(store, get, TURBO_DELAY)
             finally:
-                _TURBO_NEXT[store] = time.monotonic() + TURBO_DELAY + random.uniform(0, 1)
+                _TURBO_NEXT[store] = max(started + TURBO_MIN_INTERVAL, time.monotonic() + TURBO_DELAY) + random.uniform(0, 1)
 
 
 def amazon_page(store, get):
@@ -609,7 +693,7 @@ def scan_store(state, store, diagnostic=False):
     initial_pages, initial_challenges = _PAGE_COUNTS[store], _CHALLENGE_COUNTS[store]
     initial_load, initial_wait = _LOAD_SECONDS[store], _WAIT_SECONDS[store]
     initial_challenge_delays, delay_start = len(_CHALLENGE_DELAYS[store]), effective_delay()
-    parallel = TURBO_PARALLEL if turbo_now() else 1
+    parallel = turbo_parallel() if turbo_now() else 1
     _RETRY_LEFT[store], _SOFT[store] = True, False
 
     def once_with_retry(read):
@@ -923,7 +1007,7 @@ def plan_pages(state, store):
 
 def progress_start(slot, state, stores, only=None, request=None):
     with _PROG_LOCK:
-        PROG.update(slot=slot, only=only, request=request, started=int(time.time()), parallel=TURBO_PARALLEL if turbo_now() else 1,
+        PROG.update(slot=slot, only=only, request=request, started=int(time.time()), parallel=turbo_parallel() if turbo_now() else 1,
                     stores={s: {"total": plan_pages(state, s), "done": 0, "state": "waiting", "cur": ""} for s in stores})
     progress_send(force=True)
 
@@ -958,6 +1042,10 @@ def progress_send(force=False):
         if not PROG["slot"] or (not force and time.time() - PROG["sent"] < PROGRESS_EVERY):
             return
         PROG["sent"] = time.time()
+        try:
+            host_sample()
+        except Exception:
+            pass
         running = [s for s, x in PROG["stores"].items() if x["state"] == "running"]
         body = {"slot": PROG["slot"], "store": running[0] if running else "", "v": 2, "started": PROG["started"],
                 "only": PROG["only"], "request": PROG["request"], "parallel": PROG["parallel"],
@@ -1072,6 +1160,11 @@ def main():
     STOP["on"] = False
     t0 = time.monotonic()
     only = request.split(" p:", 1)[1].split(",") if product_scan else None
+    was_turbo = turbo_now()
+    par = turbo_parallel() if was_turbo else 1
+    _INFLIGHT["sem"] = threading.BoundedSemaphore(par)
+    _HOST_PEAK.clear()
+    host_start = host_sample()
     progress_start(slot, state, state["stores"], only, request)
 
     def one(store):
@@ -1082,9 +1175,9 @@ def main():
         if not DRY:
             send_partial(slot, store, result)
         return store, result
-    if turbo_now():
-        print("turbo:", TURBO_PARALLEL, "stores at a time, gap", TURBO_DELAY, "s per store", flush=True)
-        with ThreadPoolExecutor(max_workers=TURBO_PARALLEL) as pool:
+    if was_turbo:
+        print("turbo:", par, "stores at a time, gap", TURBO_DELAY, "s per store (at least", TURBO_MIN_INTERVAL, "s between a store's pages)", flush=True)
+        with ThreadPoolExecutor(max_workers=par) as pool:
             done = dict(pool.map(one, state["stores"]))
         payload["stores"] = {s: done[s] for s in state["stores"]}
     else:
@@ -1099,6 +1192,11 @@ def main():
     challenges, clean = scan_was_clean(payload["stores"])
     pace = update_pace(challenges, clean and not stopped)   # a stopped scan is never "a clean full scan"
     pace = turbo_after_scan(challenges, pages_read(payload["stores"]) > 0)
+    host_sample()
+    payload["host"] = {"start": host_start, "worst": dict(_HOST_PEAK), "parallel": par}
+    if was_turbo and clean and not stopped and not product_scan:
+        stats = [d.get("stats", {}) for d in payload["stores"].values()]
+        tune_parallel(par, sum(x.get("requested_pages", 0) for x in stats), payload["elapsed"], sum(x.get("load_seconds", 0) for x in stats))
     print("pace: next gap between pages", pace["delay"], "s", ("(turbo rests for %d scans)" % pace["rest"]) if TURBO and pace["rest"] else "", flush=True)
     if DRY:
         print("dry run - not sending")

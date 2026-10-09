@@ -13,6 +13,11 @@ price tracker (dashboard + Telegram alerts). It checks every 2 minutes whether a
 - **request_delay** – minimum seconds after each Amazon page, default 30 (minimum 5). This applies
   to scans, product checks, searches and seller offers together. Existing installations keep their
   configured value; set 30 explicitly after upgrading if it was 10.
+- **turbo / turbo_parallel_stores / turbo_delay** – turbo reads several stores at the same time. The number of
+  stores at once is learned from the scans (never more than `turbo_parallel_stores`): on a small machine three
+  browsers at once can be much slower than one after another, so the scanner measures and keeps the fastest. A store
+  never gets two pages closer than 6 seconds apart. Each scan also reports the machine's free memory, swap, load and
+  temperature (shown in the site's scan log).
 - **light_pages** – on by default: the browsers don't download pictures, fonts and video (the prices are read
   from the page's text). A store that shows a robot check loads complete pages for a day. Turn off to load
   everything, like 2.1.10 and earlier.

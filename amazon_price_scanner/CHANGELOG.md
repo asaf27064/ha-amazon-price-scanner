@@ -1,3 +1,12 @@
+# 2.1.12
+
+- Turbo learns how many stores to read at once (never more than `turbo_parallel_stores`): on a small host three
+  browsers at once were far slower than one after another (about 30 s a page against 4 s). After each clean scan the
+  time per page is remembered, the neighbouring level is tried when the pages look choked, and the fastest stays.
+- A store never gets two pages closer than 6 seconds apart in turbo (the pace Amazon accepted for weeks).
+- Every scan reports the host's free memory, swap, load and temperature (what the container can read), so a slow
+  scan can be explained.
+
 # 2.1.11
 
 - Light pages (option `light_pages`, on by default): the scanner's browsers no longer download pictures, fonts and

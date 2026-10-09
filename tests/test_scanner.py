@@ -802,6 +802,60 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(sorted(c.args[1] for c in partial.call_args_list), ["es", "fr", "it"])
         self.assertEqual(list(sent[0]["stores"]), ["it", "fr", "es"])                # payload keeps the store order
 
+    # ---- 2.1.12: the number of stores at once is learned
+    def test_parallel_level_is_learned_from_the_scans(self):
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_PARALLEL", 3):
+            scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0})
+            self.assertEqual(scanner.turbo_parallel(), 3)                       # starts at the configured number
+            # three at once: 30 s to load a page, 10.4 s a page overall -> choked, try two
+            self.assertEqual(scanner.tune_parallel(3, 375, 3900, 375 * 30.0), 2)
+            self.assertEqual(scanner.turbo_parallel(), 2)
+            # two at once: still choked (14 s a page to load) -> try one
+            self.assertEqual(scanner.tune_parallel(2, 375, 2800, 375 * 14.0), 1)
+            # one at a time: 6 s a page overall - the fastest; two and three are known and slower: stays
+            self.assertEqual(scanner.tune_parallel(1, 375, 2250, 375 * 3.9), 1)
+            self.assertEqual(scanner.tune_parallel(1, 375, 2250, 375 * 3.9), 1)
+            self.assertEqual(scanner.load_pace()["perf"]["3"]["s"], 10.4)
+            # a short scan teaches nothing
+            self.assertIsNone(scanner.tune_parallel(1, 20, 600, 20 * 25.0))
+            self.assertEqual(scanner.turbo_parallel(), 1)
+
+    def test_parallel_goes_back_up_when_measurements_expire_and_pages_are_light(self):
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_PARALLEL", 3):
+            old = scanner.time.time() - 8 * 86400
+            scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0, "par": 1, "perf": {"2": {"s": 9.0, "t": old}, "3": {"s": 10.4, "t": old}}})
+            self.assertEqual(scanner.tune_parallel(1, 375, 2250, 375 * 3.9), 2)   # the old numbers are forgotten: try two again
+            self.assertEqual(scanner.tune_parallel(2, 375, 1300, 375 * 5.0), 3)   # light: try three
+            self.assertEqual(scanner.tune_parallel(3, 375, 1000, 375 * 7.0), 3)   # three is the fastest: stays
+            self.assertNotIn("par", [])                                           # (no exception on odd files)
+            scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0, "par": "x", "perf": "bad"})
+            self.assertEqual(scanner.turbo_parallel(), 3)
+
+    def test_a_store_never_gets_pages_closer_than_the_minimum_interval(self):
+        clock = [1000.0]
+        with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_DELAY", 0.0), \
+                patch.object(scanner.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(scanner.time, "sleep", side_effect=lambda x: clock.__setitem__(0, clock[0] + x)) as sleep:
+            scanner._BACKOFF["on"] = False
+            scanner.save_pace({"delay": 30.0, "clean": 0, "rest": 0})
+            scanner._TURBO_NEXT.update({s: 0.0 for s in scanner._TURBO_NEXT})
+            def page():
+                clock[0] += 3.9                       # a page that loads in 3.9 s
+                return {"title": "t", "price": "1"}, ""
+            scanner.amazon_page("it", page)
+            scanner.amazon_page("it", page)
+            self.assertEqual(sleep.call_count, 1)
+            self.assertGreaterEqual(sleep.call_args.args[0], 2.0)       # 6 s between the starts: waits ~2.1 s more
+            self.assertLess(sleep.call_args.args[0], 3.2)
+
+    def test_host_info_never_fails(self):
+        info = scanner.host_info()
+        self.assertIn("cpus", info)
+        scanner._HOST_PEAK.clear()
+        with patch.object(scanner, "host_info", side_effect=[{"mem_avail_mb": 900, "load1": 1.0}, {"mem_avail_mb": 300, "load1": 4.5}, {"mem_avail_mb": 700, "load1": 2.0}]):
+            scanner.host_sample(); scanner.host_sample(); scanner.host_sample()
+        self.assertEqual(scanner._HOST_PEAK, {"mem_avail_mb": 300, "load1": 4.5})
+
     def test_turbo_paces_each_store_on_its_own(self):
         with patch.object(scanner, "TURBO", True), patch.object(scanner, "TURBO_DELAY", 5.0), patch.object(scanner.time, "sleep") as sleep:
             scanner._BACKOFF["on"] = False
@@ -910,7 +964,7 @@ class ScannerTest(unittest.TestCase):
             with patch.object(scanner, "scan_store", return_value={"jar": "", "items": [{"product": "x", "asin": "A", "raw": {"title": "t", "price": "1"}}], "stats": {"challenges": 0, "cooldown_until": 0}}), \
                     patch.object(scanner, "progress_send"), patch.object(scanner, "send_partial"), patch.object(scanner, "send_ingest", return_value=True):
                 scanner.run_followup(state, "s")
-            self.assertEqual(scanner.load_pace(), {"delay": 30.0, "clean": 2, "rest": 0})    # unchanged: not a full clean scan
+            self.assertEqual({k: scanner.load_pace()[k] for k in ("delay", "clean", "rest")}, {"delay": 30.0, "clean": 2, "rest": 0})    # unchanged: not a full clean scan
 
 
 if __name__ == "__main__":
