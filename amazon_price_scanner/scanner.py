@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.12"
+VERSION = "2.1.13"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -563,9 +563,12 @@ def update_pace(challenges, clean):
 
 
 def scan_was_clean(stores):
-    """No challenge, no page errors / skipped / paused stores, and at least one product page really read."""
+    """No challenge, no page errors / skipped / paused stores, and at least one product page really read.
+    A page that doesn't exist in a store ("product page missing") is a result, not an error - there is one in
+    every scan, and counting it meant no scan was ever "clean" (2.1.12's parallel tuning never ran)."""
     items = [i for d in stores.values() for i in d.get("items", [])]
-    bad = sum(1 for i in items if str(i["raw"].get("status", "")).startswith(("error:", "skipped", "blocked")))
+    bad = sum(1 for i in items if str(i["raw"].get("status", "")).startswith(("error:", "skipped", "blocked"))
+              and i["raw"].get("status") != "error: product page missing")
     good = sum(1 for i in items if not i["raw"].get("status") and i["raw"].get("title"))
     challenges = sum(d.get("stats", {}).get("challenges", 0) for d in stores.values())
     return challenges, challenges == 0 and bad == 0 and good > 0

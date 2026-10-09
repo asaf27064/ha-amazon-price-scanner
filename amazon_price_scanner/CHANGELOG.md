@@ -1,3 +1,8 @@
+# 2.1.13
+
+- Fix: a page that doesn't exist in a store no longer makes the scan count as "not clean" - so the learning of how
+  many stores to read at once (2.1.12) actually runs.
+
 # 2.1.12
 
 - Turbo learns how many stores to read at once (never more than `turbo_parallel_stores`): on a small host three

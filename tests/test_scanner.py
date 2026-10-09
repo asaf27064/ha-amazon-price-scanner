@@ -644,6 +644,9 @@ class ScannerTest(unittest.TestCase):
         good = {"it": {"items": [{"raw": {"title": "x", "price": "1€"}}], "stats": {"challenges": 0}}}
         self.assertEqual(scanner.scan_was_clean(failed), (0, False))
         self.assertEqual(scanner.scan_was_clean(good), (0, True))
+        # a page that doesn't exist in this store is a result: the scan is still clean (there is one in every scan)
+        with_missing = {"it": {"items": good["it"]["items"] + [{"raw": {"status": "error: product page missing"}}], "stats": good["it"].get("stats", {})}}
+        self.assertEqual(scanner.scan_was_clean(with_missing), (0, True))
         with patch.object(scanner, "REQUEST_DELAY", 30.0), patch.object(scanner, "MIN_REQUEST_DELAY", 20.0):
             scanner.save_pace({"delay": 30.0, "clean": 0})
             for _ in range(3):
