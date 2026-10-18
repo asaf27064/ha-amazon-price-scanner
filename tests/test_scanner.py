@@ -851,6 +851,22 @@ class ScannerTest(unittest.TestCase):
             self.assertGreaterEqual(sleep.call_args.args[0], 2.0)       # 6 s between the starts: waits ~2.1 s more
             self.assertLess(sleep.call_args.args[0], 3.2)
 
+    def test_cpu_share_separates_the_scanner_from_everything_else(self):
+        # 4 CPUs, 10 s: 4000 ticks; 3000 busy; the scanner used 12 s of CPU = 1200 ticks
+        a = {"total": 10000, "idle": 5000, "ours_us": 0}
+        b = {"total": 14000, "idle": 6000, "ours_us": 12_000_000}
+        with patch.object(scanner.os, "sysconf", return_value=100, create=True):
+            self.assertEqual(scanner.cpu_share(a, b), {"busy": 75, "ours": 30, "others": 45})
+        self.assertEqual(scanner.cpu_share({}, b), {})
+        self.assertEqual(scanner.cpu_share({"total": 1, "idle": 1}, {"total": 1, "idle": 1}), {})
+        self.assertEqual(scanner.cpu_share({"total": 0, "idle": 0}, {"total": 100, "idle": 40}), {"busy": 60})
+        self.assertIsInstance(scanner.cpu_snapshot(), dict)        # never fails (Windows test machine: empty)
+        # the idle window: the previous loop's snapshot against this one
+        scanner.CPU_IDLE.update(snap=None, at=0.0, share=None)
+        with patch.object(scanner, "cpu_snapshot", side_effect=[a, b]), patch.object(scanner.os, "sysconf", return_value=100, create=True):
+            scanner.note_idle_cpu(); scanner.note_idle_cpu()
+        self.assertEqual(scanner.CPU_IDLE["share"], {"busy": 75, "ours": 30, "others": 45})
+
     def test_host_info_never_fails(self):
         info = scanner.host_info()
         self.assertIn("cpus", info)

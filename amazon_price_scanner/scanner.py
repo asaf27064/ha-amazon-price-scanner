@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.13"
+VERSION = "2.1.14"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -518,6 +518,57 @@ def host_info():
     except Exception:
         pass
     return info
+
+
+def cpu_snapshot():
+    """The whole machine's CPU counters (/proc/stat is the host's, also inside the container) and this add-on's own
+    CPU time (its cgroup). Two snapshots tell how busy the machine was and how much of that was not the scanner."""
+    snap = {}
+    try:
+        vals = [int(x) for x in Path("/proc/stat").read_text().splitlines()[0].split()[1:9]]
+        snap["total"], snap["idle"] = sum(vals), vals[3] + (vals[4] if len(vals) > 4 else 0)
+    except Exception:
+        pass
+    try:
+        for line in Path("/sys/fs/cgroup/cpu.stat").read_text().splitlines():
+            if line.startswith("usage_usec"):
+                snap["ours_us"] = int(line.split()[1])
+    except Exception:
+        try:
+            snap["ours_us"] = int(Path("/sys/fs/cgroup/cpuacct/cpuacct.usage").read_text()) // 1000
+        except Exception:
+            pass
+    return snap
+
+
+def cpu_share(a, b):
+    """Between two snapshots, in % of the whole machine: busy, the scanner's part, everything else's part."""
+    if "total" not in a or "total" not in b or b["total"] <= a["total"]:
+        return {}
+    ticks = b["total"] - a["total"]
+    busy = ticks - (b["idle"] - a["idle"])
+    out = {"busy": round(100 * busy / ticks)}
+    if "ours_us" in a and "ours_us" in b:
+        hz = 100
+        try:
+            hz = os.sysconf("SC_CLK_TCK") or 100
+        except (AttributeError, ValueError, OSError):
+            pass
+        ours = min(busy, (b["ours_us"] - a["ours_us"]) / 1e6 * hz)
+        out["ours"] = round(100 * ours / ticks)
+        out["others"] = max(0, out["busy"] - out["ours"])
+    return out
+
+
+# the minutes before a scan (the loop looks every 2 minutes): how busy the machine is without the scanner
+CPU_IDLE = {"snap": None, "at": 0.0, "share": None}
+
+
+def note_idle_cpu():
+    now, at = cpu_snapshot(), time.monotonic()
+    if CPU_IDLE["snap"] and at - CPU_IDLE["at"] < 600:
+        CPU_IDLE["share"] = cpu_share(CPU_IDLE["snap"], now)
+    CPU_IDLE.update(snap=now, at=at)
 
 
 def host_sample():
@@ -1113,6 +1164,10 @@ def send_ingest(payload):
 
 
 def main():
+    try:
+        note_idle_cpu()
+    except Exception:
+        pass
     response = requests.get(WORKER + "/api/state", headers=AUTH, timeout=60)
     if moved(response):
         return 0                         # the next check (seconds away) asks the new address
@@ -1168,6 +1223,7 @@ def main():
     _INFLIGHT["sem"] = threading.BoundedSemaphore(par)
     _HOST_PEAK.clear()
     host_start = host_sample()
+    cpu1 = cpu_snapshot()
     progress_start(slot, state, state["stores"], only, request)
 
     def one(store):
@@ -1196,7 +1252,8 @@ def main():
     pace = update_pace(challenges, clean and not stopped)   # a stopped scan is never "a clean full scan"
     pace = turbo_after_scan(challenges, pages_read(payload["stores"]) > 0)
     host_sample()
-    payload["host"] = {"start": host_start, "worst": dict(_HOST_PEAK), "parallel": par}
+    payload["host"] = {"start": host_start, "worst": dict(_HOST_PEAK), "parallel": par,
+                       "cpu_before": CPU_IDLE.get("share") or {}, "cpu_during": cpu_share(cpu1, cpu_snapshot())}
     if was_turbo and clean and not stopped and not product_scan:
         stats = [d.get("stats", {}) for d in payload["stores"].values()]
         tune_parallel(par, sum(x.get("requested_pages", 0) for x in stats), payload["elapsed"], sum(x.get("load_seconds", 0) for x in stats))

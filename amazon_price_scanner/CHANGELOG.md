@@ -1,3 +1,9 @@
+# 2.1.14
+
+- Each scan also reports how busy the machine's CPU was, and how much of it was the scanner and how much everything
+  else - measured during the scan and in the minutes before it (the scanner idle). Shown in the site's scan log: it tells
+  whether a slow scan is the scanner itself or another add-on / process on the Home Assistant machine.
+
 # 2.1.13
 
 - Fix: a page that doesn't exist in a store no longer makes the scan count as "not clean" - so the learning of how
