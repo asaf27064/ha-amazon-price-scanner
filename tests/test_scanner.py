@@ -183,6 +183,28 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scanner.prefer_amazon(get, "us", "B000000001", amazon), (amazon, False))
         get.assert_not_called()
 
+    def test_no_buy_box_reads_amazon_offer(self):
+        # amazon.com B0FY4KZQVH (7.11.2026): no featured offer on the page, Amazon's own offer only under its smid
+        nobox = {"to": "Israel", "title": "x", "price": "", "avail": "", "buybox": "No featured offers available See All Buying Options"}
+        own = {"to": "Israel", "title": "x", "price": "$25.99", "seller": "Ships from and sold by Amazon.com"}
+        get = Mock(return_value=dict(own))
+        raw, blocked = scanner.prefer_amazon(get, "us", "B000000001", nobox)
+        self.assertFalse(blocked)
+        get.assert_called_once_with("?smid=A2XZ7JICGUQ1CX&psc=1")
+        self.assertEqual(raw["price"], "$25.99")
+        self.assertNotIn("alt", raw)           # no marketplace offer to compare with
+        self.assertIn("smid=A2XZ7JICGUQ1CX", raw["url"])
+        # no Amazon offer either: the page stays as it was
+        raw, _ = scanner.prefer_amazon(Mock(return_value={"title": "x", "price": ""}), "us", "B000000001", nobox)
+        self.assertIs(raw, nobox)
+        # a real "out of stock" / "can't ship" page costs no extra page
+        get = Mock()
+        for page in ({"title": "x", "avail": "Currently unavailable."}, {"title": "x", "avail": "This item cannot be shipped to your selected delivery location."},
+                     {"title": "x", "avail": ""}, {"title": "", "avail": ""}, {"captcha": True}):
+            self.assertEqual(scanner.prefer_amazon(get, "us", "B000000001", page), (page, False))
+        get.assert_not_called()
+        self.assertTrue(scanner.no_buy_box({"title": "x", "avail": "Alle Kaufoptionen anzeigen"}))
+
     def test_scan_reads_amazon_offer_for_marketplace_buy_box(self):
         page = GOOD + '<div id="corePrice_feature_div"><span class="a-offscreen">10,00€</span></div>'
         third = scanner.parse(page + '<div id="merchantInfoFeature_feature_div">Venduto da Negozio</div>')

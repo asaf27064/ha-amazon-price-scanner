@@ -318,6 +318,11 @@ SHIP_L = r"Ships from|Dispatches from|Spedito da|Speditore|Expédié par|Expédi
 SOLD_L = (r"Ships from and sold by|Dispatched from and sold by|Venduto e spedito da|Vendu et expédié par|"
           r"Vendido y enviado por|Verkauf und Versand durch|"
           r"Sold by|Venduto da|Venditore|Vendu par|Vendeur|Vendido por|Vendedor|Verkauf durch|Verkäufer")
+# a page without a buy box ("No featured offers available / See All Buying Options"): the item has offers, none of
+# them featured - Amazon's own one is still there under its seller id (dp/ASIN?smid=…), so it's read like a 3P buy box
+NO_FEATURED_RE = re.compile(r"No featured offers|See All Buying Options|Keine empfohlenen Angebote|Alle Kaufoptionen|"
+                            r"Nessuna offerta in evidenza|Vedi tutte le opzioni|Aucune offre (?:en vedette|mise en avant)|"
+                            r"Voir toutes les options d.achat|No hay ofertas destacadas|Ver todas las opciones de compra", re.I)
 ALT_KEYS = ("to", "title", "price", "price2", "pep", "promo", "delivery", "delivery2", "avail", "seller", "returns", "buybox", "global")
 
 
@@ -332,12 +337,26 @@ def seller_kind(raw):
     return "amazon" if raw.get("seller", "").strip().lower().startswith("amazon") else ""
 
 
+def no_buy_box(raw):
+    """A readable product page with no price at all that says it has offers, none of them featured."""
+    if raw.get("status") or raw.get("captcha") or not raw.get("title") or raw.get("price") or raw.get("price2"):
+        return False
+    return bool(NO_FEATURED_RE.search(f'{raw.get("buybox", "")} {raw.get("avail", "")}'))
+
+
+def wants_amazon_offer(raw):
+    return no_buy_box(raw) or (not raw.get("status") and not raw.get("captcha")
+                               and bool(raw.get("price") or raw.get("price2")) and seller_kind(raw) == "other")
+
+
 def prefer_amazon(get, store, asin, raw):
-    """When a marketplace seller has the buy box, read Amazon's own offer too (one extra page).
-    Returns (page, blocked): Amazon's offer with the marketplace offer attached as "alt" (or the original
-    page), and whether Amazon answered the extra page with a challenge (the caller pauses the store)."""
-    if raw.get("status") or raw.get("captcha") or not (raw.get("price") or raw.get("price2")) or seller_kind(raw) != "other":
+    """When a marketplace seller has the buy box - or there's no buy box at all - read Amazon's own offer too
+    (one extra page). Returns (page, blocked): Amazon's offer, with the marketplace offer attached as "alt" when
+    there was one (or the original page), and whether Amazon answered the extra page with a challenge (the caller
+    pauses the store)."""
+    if not wants_amazon_offer(raw):
         return raw, False
+    nobox = no_buy_box(raw)
     query = f"?smid={AMAZON_SMID[store]}&psc=1"
     try:
         own = get(query)
@@ -349,7 +368,8 @@ def prefer_amazon(get, store, asin, raw):
         return raw, True
     if own.get("status") or seller_kind(own) != "amazon" or not (own.get("price") or own.get("price2")):
         return raw, False
-    own["alt"] = {k: raw.get(k, "") for k in ALT_KEYS}
+    if not nobox:
+        own["alt"] = {k: raw.get(k, "") for k in ALT_KEYS}
     own["url"] = f"https://www.amazon.{DOMAIN[store]}/dp/{asin}{query}"
     own.pop("variations", None)
     if raw.get("variations"):
@@ -817,7 +837,7 @@ def scan_store(state, store, diagnostic=False):
                         if (not is_blocked(raw) and raw.get("title")
                                 and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
                             jar = candidate_jar
-                            if not diagnostic and seller_kind(raw) == "other":
+                            if not diagnostic and wants_amazon_offer(raw):
                                 def get(query, asin=asin):
                                     return read_product(session, browser, store, asin, jar, query)[0]
                                 raw, smid_blocked = prefer_amazon(get, store, asin, raw)

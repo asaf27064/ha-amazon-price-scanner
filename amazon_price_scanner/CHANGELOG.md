@@ -1,3 +1,9 @@
+# 2.1.15
+
+- Fix: a product page with no buy box ("No featured offers available / See All Buying Options") showed "no price"
+  although Amazon itself sells the item - its offer only appears under Amazon's seller id. Such a page now gets the
+  same extra read of Amazon's own offer as a page where a marketplace seller has the buy box.
+
 # 2.1.14
 
 - Each scan also reports how busy the machine's CPU was, and how much of it was the scanner and how much everything
