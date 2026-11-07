@@ -1,3 +1,10 @@
+# 2.1.16
+
+- A product page whose buy box is replaced by "Similar items shipping to Israel / See Similar Items" (the featured
+  offer doesn't ship here) also reads Amazon's own offer, which may ship. Without one, the site now shows "not
+  shippable to Israel" instead of "no price".
+- The version the scanner reports is right again (2.1.15 still reported 2.1.14).
+
 # 2.1.15
 
 - Fix: a product page with no buy box ("No featured offers available / See All Buying Options") showed "no price"

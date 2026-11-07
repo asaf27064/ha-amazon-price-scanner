@@ -204,6 +204,8 @@ class ScannerTest(unittest.TestCase):
             self.assertEqual(scanner.prefer_amazon(get, "us", "B000000001", page), (page, False))
         get.assert_not_called()
         self.assertTrue(scanner.no_buy_box({"title": "x", "avail": "Alle Kaufoptionen anzeigen"}))
+        # the buy box replaced by similar items that do ship to Israel (amazon.com B0FY4KZQVH)
+        self.assertTrue(scanner.no_buy_box({"title": "x", "to": "Israel", "buybox": "Deliver to Israel Similar items shipping to Israel IL Israel See Similar Items"}))
 
     def test_scan_reads_amazon_offer_for_marketplace_buy_box(self):
         page = GOOD + '<div id="corePrice_feature_div"><span class="a-offscreen">10,00€</span></div>'

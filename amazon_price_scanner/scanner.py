@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.14"
+VERSION = "2.1.16"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -322,7 +322,11 @@ SOLD_L = (r"Ships from and sold by|Dispatched from and sold by|Venduto e spedito
 # them featured - Amazon's own one is still there under its seller id (dp/ASIN?smid=…), so it's read like a 3P buy box
 NO_FEATURED_RE = re.compile(r"No featured offers|See All Buying Options|Keine empfohlenen Angebote|Alle Kaufoptionen|"
                             r"Nessuna offerta in evidenza|Vedi tutte le opzioni|Aucune offre (?:en vedette|mise en avant)|"
-                            r"Voir toutes les options d.achat|No hay ofertas destacadas|Ver todas las opciones de compra", re.I)
+                            r"Voir toutes les options d.achat|No hay ofertas destacadas|Ver todas las opciones de compra|"
+                            # the buy box swapped for "Similar items shipping to Israel": the featured offer doesn't ship
+                            # here - Amazon's own one may (amazon.com B0FY4KZQVH, 7.11.2026)
+                            r"Similar items shipping to|See Similar Items|Ähnliche Artikel|Articoli simili|"
+                            r"Articles similaires|Artículos similares", re.I)
 ALT_KEYS = ("to", "title", "price", "price2", "pep", "promo", "delivery", "delivery2", "avail", "seller", "returns", "buybox", "global")
 
 
