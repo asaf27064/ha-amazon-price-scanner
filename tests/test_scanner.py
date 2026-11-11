@@ -183,6 +183,19 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(scanner.prefer_amazon(get, "us", "B000000001", amazon), (amazon, False))
         get.assert_not_called()
 
+    def test_reads_the_deal_badge(self):
+        page = GOOD + ('<div id="corePriceDisplay_desktop_feature_div"><div id="dealBadge_feature_div"><span>Early Black Friday Deal</span></div>'
+                       '<span class="savingsPercentage">-25%</span><span class="a-offscreen">$29.99</span>'
+                       '<div class="basisPrice">Typical price: <span class="a-offscreen">$39.99</span></div></div>'
+                       '<div id="dealBadgeSupportingText_feature_div">Ends in 12:30:05</div>')
+        raw = scanner.parse(page)
+        self.assertIn("Early Black Friday Deal", raw["deal"])
+        self.assertIn("Ends in 12:30:05", raw["deal"])
+        self.assertEqual(raw["savings"], "-25%")
+        self.assertIn("$39.99", raw["basis"])
+        self.assertIn("Early Black Friday Deal", raw["core"])
+        self.assertEqual(scanner.parse(GOOD)["deal"], "")
+
     def test_no_buy_box_reads_amazon_offer(self):
         # amazon.com B0FY4KZQVH (7.11.2026): no featured offer on the page, Amazon's own offer only under its smid
         nobox = {"to": "Israel", "title": "x", "price": "", "avail": "", "buybox": "No featured offers available See All Buying Options"}

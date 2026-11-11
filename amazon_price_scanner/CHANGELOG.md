@@ -1,3 +1,10 @@
+# 2.1.17
+
+- Reads Amazon's deal badge on the product page ("Early Black Friday Deal", "Black Friday Deal", "Limited time
+  deal", "Lightning Deal … % claimed", "Ends in …"), the price the deal is measured against ("Typical price" /
+  "List Price" / UVP / prezzo consigliato…) and its percentage. The site shows the deal on the offer, in the receipt
+  and in the Telegram alert.
+
 # 2.1.16
 
 - A product page whose buy box is replaced by "Similar items shipping to Israel / See Similar Items" (the featured

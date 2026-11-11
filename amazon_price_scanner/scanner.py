@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.16"
+VERSION = "2.1.17"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -192,6 +192,14 @@ def parse(html):
         el = soup.select_one(css)
         return clean(el.get_text(" ")) [:limit] if el else ""
 
+    def all_txt(css, limit):
+        seen = []
+        for el in soup.select(css):
+            t = clean(el.get_text(" "))
+            if t and not any(t in s for s in seen):
+                seen.append(t)
+        return " | ".join(seen)[:limit]
+
     return {
         "captcha": captcha,
         "title": txt("#productTitle", 300),
@@ -209,6 +217,13 @@ def parse(html):
         "promo": txt("#promoPriceBlockMessage_feature_div", 400),   # coupons / checkout discounts / multi-buy     # "join Prime to buy this item at X": a members-only price
         "buybox": txt("#buybox", 800),
         "global": txt("#amazonGlobal_feature_div", 700),
+        # Amazon's deal badge ("Early Black Friday Deal", "Limited time deal", "Lightning Deal 60% claimed", "Ends in"),
+        # the price it's measured against ("Typical price" / "List Price" / UVP...) and its "-25%"; the Worker reads them
+        "deal": all_txt('[id*="dealBadge" i], [class*="dealBadge" i], [id*="deal_badge" i], [id*="dealExpiry" i], '
+                        '[id*="dealprogress" i], [id*="lightningDeal" i], [id*="dealsAccordion" i]', 300),
+        "basis": txt("#corePriceDisplay_desktop_feature_div .basisPrice, #corePrice_feature_div .basisPrice", 120),
+        "savings": txt("#corePriceDisplay_desktop_feature_div .savingsPercentage", 12),
+        "core": txt("#corePriceDisplay_desktop_feature_div", 300),
         "image": image,
         "details": details,
         "variations": variations,
