@@ -997,6 +997,45 @@ class ScannerTest(unittest.TestCase):
         self.assertGreater(scanner.load_cooldowns()["it"], scanner.time.time())
         self.assertIn(scanner.CHALLENGE_RETRY, [c.args[0] for c in sleep.call_args_list])
 
+    # ---- 2.1.18
+    def test_a_store_that_lost_israel_restarts_its_session_once_and_reads_again(self):
+        import types
+        calls = []
+
+        class FakeBrowser:
+            def __init__(self, *a):
+                self.israel = False
+
+            def needs_warm_up(self):
+                return False
+
+            def reset_session(self, jar):
+                calls.append(("reset", jar))
+                self.israel = True
+
+            def fetch(self, asin, parse, jar, query=""):
+                calls.append(asin)
+                return {"title": "Product", "to": "Israele" if self.israel else "Netherlands", "price": "1€", "captcha": False}, jar
+
+            def close(self):
+                pass
+        fake = types.ModuleType("browser_client")
+        fake.BrowserClient = FakeBrowser
+        with patch.dict(scanner.sys.modules, {"browser_client": fake}), patch.object(scanner, "TRANSPORT", "browser"):
+            result = scanner.scan_store(self.state, "it")
+        resets = [c for c in calls if isinstance(c, tuple)]
+        self.assertEqual(len(resets), 1)
+        self.assertIn("session-id=original", resets[0][1])               # the tracker's cookies
+        self.assertEqual(calls[:3], ["B000000001", resets[0], "B000000001"])  # the page is read again
+        self.assertTrue(all(i["raw"]["to"] == "Israele" for i in result["items"]))
+
+    def test_foreign_delivery_is_a_real_page_elsewhere_only(self):
+        self.assertTrue(scanner.foreign_delivery({"title": "P", "to": "Netherlands"}))
+        self.assertFalse(scanner.foreign_delivery({"title": "P", "to": "Israël"}))
+        self.assertFalse(scanner.foreign_delivery({"title": "", "to": "Netherlands"}))
+        self.assertFalse(scanner.foreign_delivery({"title": "P", "to": ""}))
+        self.assertFalse(scanner.foreign_delivery({"title": "P", "to": "Netherlands", "captcha": True}))
+
     def test_undelivered_followup_is_resent_even_when_the_slot_counts_as_scanned(self):
         state = {"settings": {"engine": "home", "mode": "3x"}, "stores": ["it"], "products": [], "cookies": {},
                  "schedules": {"3x": [8, 14, 20]}, "lastScanSlot": "2026-09-26 08", "scanRequest": None}

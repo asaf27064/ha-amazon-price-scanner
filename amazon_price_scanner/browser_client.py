@@ -25,6 +25,7 @@ LIGHT_OFF_AFTER_CHALLENGE = 24 * 3600   # a store that showed a robot check gets
 class BrowserClient:
     def __init__(self, store, domain, jar, cookie_filter, data_dir):
         self.origin = f"https://www.amazon.{domain}"
+        self.domain = domain
         self.cookie_filter = cookie_filter
         self.profile = Path(data_dir) / "browser" / store
         self.profile.mkdir(parents=True, exist_ok=True)
@@ -63,17 +64,31 @@ class BrowserClient:
             # Worker cookies seed a NEW profile only. Its light fallback can change
             # the shared jar; that must not overwrite this browser's live session.
             if not has_session:
-                for part in jar.split(";"):
-                    if "=" not in part:
-                        continue
-                    name, value = part.strip().split("=", 1)
-                    if cookie_filter.fullmatch(name):
-                        self.driver.execute_cdp_cmd("Network.setCookie", {
-                            "name": name, "value": value, "domain": f".amazon.{domain}",
-                            "path": "/", "secure": True})
+                self._seed(jar)
         except Exception:
             self.close()
             raise
+
+    def _seed(self, jar):
+        for part in jar.split(";"):
+            if "=" not in part:
+                continue
+            name, value = part.strip().split("=", 1)
+            if self.cookie_filter.fullmatch(name):
+                self.driver.execute_cdp_cmd("Network.setCookie", {
+                    "name": name, "value": value, "domain": f".amazon.{self.domain}",
+                    "path": "/", "secure": True})
+
+    def reset_session(self, jar):
+        """Amazon dropped this profile's delivery location (its pages say another country, e.g. 24.11.2026: the UK
+        profile showed "Netherlands", the French one "États-Unis" - every page of those stores failed for a day).
+        Drop the profile's Amazon session and start again from the tracker's cookies (an Israel session)."""
+        self.driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
+        try:
+            (self.profile / "session-cookies.json").unlink()
+        except FileNotFoundError:
+            pass
+        self._seed(jar)
 
     def _look_ordinary(self):
         """The same Chromium, without the headless label and with the household's time zone."""

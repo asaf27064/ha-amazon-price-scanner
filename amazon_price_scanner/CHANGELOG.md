@@ -1,3 +1,11 @@
+# 2.1.18
+
+- A store whose pages deliver somewhere other than Israel (Amazon dropped the session's location: from 24.11.2026
+  the UK pages said "Netherlands" and the French ones "États-Unis", so every page of those stores failed for a day)
+  starts that store's browser session again from the tracker's cookies and reads the page again - once per scan /
+  product check. Before, the browser kept its own (lost) session and the tracker's fresh cookies only seeded a new
+  profile.
+
 # 2.1.17
 
 - Reads Amazon's deal badge on the product page ("Early Black Friday Deal", "Black Friday Deal", "Limited time

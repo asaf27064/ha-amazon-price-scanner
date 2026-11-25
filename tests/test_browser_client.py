@@ -55,6 +55,9 @@ class Driver:
             return {}
         if method == "Network.getCookies":
             return {"cookies": self.cookies}
+        if method == "Network.clearBrowserCookies":
+            self.cookies = []
+            return {}
         if method == "Network.setCookie":
             self.cookies = [c for c in self.cookies if c["name"] != args["name"]]
             self.cookies.append({**args, "session": True})
@@ -88,6 +91,17 @@ class BrowserSessionTest(unittest.TestCase):
         self.assertEqual({c["name"]: c["value"] for c in driver.cookies},
                          {"session-id": "original", "session-token": "token"})
         second.close()
+
+    def test_a_lost_location_restarts_the_session_from_the_tracker_cookies(self):
+        first = self.client(Driver(), "session-id=lost; session-token=lost-token")      # saved session cookies
+        first.close()
+        driver = Driver()
+        client = self.client(driver, "session-id=ignored")
+        self.assertEqual({c["name"]: c["value"] for c in driver.cookies}, {"session-id": "lost", "session-token": "lost-token"})
+        client.reset_session("session-id=israel; session-token=fresh; auth-token=private")
+        self.assertEqual({c["name"]: c["value"] for c in driver.cookies}, {"session-id": "israel", "session-token": "fresh"})
+        self.assertFalse((Path(self.tmp.name) / "browser" / "it" / "session-cookies.json").exists())
+        client.close()
 
     def test_missing_session_is_seeded_with_only_allowlisted_cookies(self):
         driver = Driver()

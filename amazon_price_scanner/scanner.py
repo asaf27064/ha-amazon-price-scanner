@@ -83,7 +83,7 @@ PACE_STEP = 2.5
 BLOCK_COOLDOWN = 3600
 # a store's first challenge in a scan: wait this long and reload that page once before pausing the store
 CHALLENGE_RETRY = max(0.0, float(os.environ.get("CHALLENGE_RETRY_SECONDS", "90")))
-VERSION = "2.1.17"
+VERSION = "2.1.18"
 CHECK_CONCURRENCY = min(6, max(1, int(os.environ.get("CHECK_CONCURRENCY", "3"))))
 # Turbo: several stores at the same time (each its own browser and its own gap). The first challenge puts the rest
 # of that scan back on the safe path (one page at a time, REQUEST_DELAY apart), and turbo rests for TURBO_REST scans.
@@ -394,6 +394,12 @@ def prefer_amazon(get, store, asin, raw):
     if raw.get("variations"):
         own["variations"] = raw["variations"]
     return own, False
+
+
+def foreign_delivery(raw):
+    """A real product page whose header delivers somewhere other than Israel: the session lost its location."""
+    return (not is_blocked(raw) and bool(raw.get("title")) and bool(raw.get("to"))
+            and not re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I))
 
 
 def is_blocked(raw):
@@ -778,6 +784,7 @@ def scan_store(state, store, diagnostic=False):
     jar = state["cookies"].get(store, "")
     items = []
     blocked = False
+    reset_done = False
     aborted = False
     errors_in_row = 0
     cooling = load_cooldowns().get(store, 0) > time.time()
@@ -852,6 +859,13 @@ def scan_store(state, store, diagnostic=False):
                         elif TRANSPORT != "requests":
                             raise ValueError("unknown transport")
                         raw, candidate_jar = once_with_retry(lambda: read_product(session, browser, store, asin, jar))
+                        if browser is not None and not reset_done and foreign_delivery(raw):
+                            # the profile lost Israel: start it again from the tracker's cookies, read the page again
+                            reset_done = True
+                            print(store, "delivery location is not Israel; restarting the session from the tracker's cookies",
+                                  flush=True)
+                            browser.reset_session(request_cookies(state["cookies"].get(store, ""), store))
+                            raw, candidate_jar = once_with_retry(lambda: read_product(session, browser, store, asin, jar))
                         # Accept updated delivery sessions only on real Israel product pages.
                         if (not is_blocked(raw) and raw.get("title")
                                 and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
@@ -907,6 +921,7 @@ class StoreClient:
         self.store, self.jar = store, jar
         self.session = requests.Session()
         self.browser = None
+        self.reset_done = False
 
     def _browser(self):
         if self.browser is None:
@@ -918,6 +933,10 @@ class StoreClient:
     def product(self, asin, query=""):
         browser = self._browser() if TRANSPORT == "browser" else None
         raw, candidate = read_product(self.session, browser, self.store, asin, self.jar, query)
+        if browser is not None and not self.reset_done and foreign_delivery(raw):
+            self.reset_done = True                    # the profile lost Israel: start it again, read the page again
+            browser.reset_session(request_cookies(self.jar, self.store))
+            raw, candidate = read_product(self.session, browser, self.store, asin, self.jar, query)
         if (not is_blocked(raw) and raw.get("title")
                 and re.search(r"israel|israël|israele|ישראל", raw.get("to", ""), re.I)):
             self.jar = candidate
